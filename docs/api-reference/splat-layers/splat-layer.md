@@ -4,8 +4,15 @@ The `SplatLayer` renders a 3D Gaussian splat scene — a radiance-field capture 
 geographic position, composited into deck.gl's own render pass alongside the rest of your layers.
 
 Two things follow from being a real deck.gl layer rather than an overlaid canvas. Opaque geometry
-drawn by earlier layers occludes splats behind it, because they share a depth buffer. And the splats
-participate in picking, which no other web splat renderer offers.
+drawn by earlier layers occludes splats behind it, because they share a depth buffer. And on WebGPU
+the splats participate in deck.gl's own picking, hover and tooltips.
+
+```bash
+npm install @deck.gl/core @deck.gl/splat-layers @luma.gl/splats
+```
+
+> `@deck.gl/splat-layers` calls `@luma.gl/splats` APIs that are not in a published luma.gl release
+> yet. Until they are, it has to be built against the luma.gl `deck-splat-layers` branch.
 
 ```js
 import {Deck} from '@deck.gl/core';
@@ -23,15 +30,6 @@ const layer = new SplatLayer({
 new Deck({layers: [layer]});
 ```
 
-```bash
-npm install @deck.gl/core @deck.gl/splat-layers @luma.gl/splats
-```
-
-```js
-import {SplatLayer} from '@deck.gl/splat-layers';
-new SplatLayer({});
-```
-
 ## Backends
 
 The layer binds whichever luma.gl splat renderer the device can run.
@@ -39,30 +37,45 @@ The layer binds whichever luma.gl splat renderer the device can run.
 **WebGPU** projects, culls, sorts, evaluates spherical harmonics and issues an indirect draw
 entirely as GPU compute over the source buffers, with no CPU row walk at all. That work is recorded
 in the layer's `compute` stage — deck.gl's own encoder, immediately before the render pass that
-consumes it — so there is no extra submission, no hand-written synchronization, and in a multi-view
-frame each camera gets its own depth order.
+consumes it — so there is no extra submission and no hand-written synchronization.
 
 **WebGL2** is the fallback. It has no storage buffers, so the sorted order has to be materialized by
 physically permuting every source attribute on the CPU, and spherical harmonics above degree 0 are
 evaluated per splat in JavaScript whenever the camera moves. Both costs are linear in the splat
 count and both land on the main thread. This path works; it is not fast, and it is why the residency
-budget exists.
+budget exists. **The WebGL2 path is not pickable**: it has no picking output, so the layer skips
+deck.gl's picking passes there.
 
 `getSplatBackend()` reports which one the layer bound to.
+
+### One view at a time
+
+The layer owns one renderer, one traversal and one set of camera uniforms, so it renders into a
+single viewport per frame: the first one it is drawn in. In a multi-view `Deck` it is skipped in
+every other viewport, rather than re-sorting and re-traversing for each camera in turn. Use
+`layerFilter` to choose which view shows it; to show a scene in several views, give each view its
+own layer and route each with `layerFilter`.
+
+### Positioning
+
+The scene is positioned by [`coordinateOrigin`](#coordinateorigin), `heading`, `upAxis` and the
+normalization described under the placement properties below. `coordinateSystem` is ignored.
 
 ## Giving it a scene
 
 ### Resident
 
 `splatSource` takes decoded columns — positions, scales, rotations, colors, opacities and optional
-spherical harmonics, as `@loaders.gl/splats` produces them from SPZ, a Gaussian PLY or a SOG bundle.
-Everything is uploaded once and nothing changes after the first frame. Several sources are uploaded
-as several batches and kept intact; the sort spans all of them.
+spherical harmonics — in luma.gl's `SplatSource` layout. No published loaders.gl release decodes
+Gaussian PLY or SOG into these columns yet, so decode them yourself for now. Everything is uploaded
+once and nothing changes after the first frame. Several sources are uploaded as several batches and
+kept intact; the sort spans all of them.
 
 ### Streaming
 
 `splatHierarchy` takes a level-of-detail tree, which the layer traverses against the camera each
-frame. It requests the nodes whose geometric error projects to more than `maximumScreenSpaceError`
+frame. `createPageLoader(device)` is called once per scene, and the prop is compared by identity: a
+new object is a new scene, so keep one per scene. It requests the nodes whose geometric error projects to more than `maximumScreenSpaceError`
 pixels, and a residency window bounds what stays on the GPU.
 
 Two properties make that affordable. The renderer's command graph is compiled once against the
@@ -72,7 +85,8 @@ own units against a scene-local camera, so its screen-space error comes out in r
 
 A streaming scene must supply `scenePercentiles`, unless it is `georeferenced`: the layer normalizes
 arbitrary source units onto a metre footprint from robust percentiles of the splat centers, and no
-single page has seen enough of them to measure that itself.
+single page has seen enough of them to measure that itself. With neither, nothing is drawn and the
+layer logs a warning.
 
 ### Streaming a tree that grows
 
@@ -113,7 +127,7 @@ Decoded, caller-owned splat columns. Uploaded once and kept intact.
 #### `splatHierarchy` (SplatHierarchySource, optional) {#splathierarchy}
 
 A streaming level-of-detail tree. Takes precedence over `splatSource`. Pages it loads are owned by
-the layer's residency manager and destroyed when evicted.
+the layer's residency manager and destroyed when evicted. Compared by identity.
 
 #### `maximumScreenSpaceError` (number, optional) {#maximumscreenspaceerror}
 
@@ -127,8 +141,15 @@ does nothing.
 #### `residencyBudget` (SplatResidencyBudget, optional) {#residencybudget}
 
 Ceiling on what a streaming scene keeps on the GPU. Defaults to a preset chosen from the device;
-anything set here overrides the matching field of that preset. See
-[device budgets](./splat-device-budgets.md).
+anything set here overrides the matching field of that preset. A `maxResidentSplats` set without a
+`maxGpuBytes` brings the byte ceiling that splat count implies rather than keeping the preset's, so
+raising the splat count raises the whole budget. See [device budgets](./splat-device-budgets.md).
+
+The traversal plans its selection against about two thirds of whichever ceiling binds first: a
+quarter of what remains is reserved for the coarse parents kept resident under their children, and
+an eighth for pages lingering while their replacements fade in. A byte ceiling is converted to
+splats at what this scene's resident pages actually cost, measured once pages arrive, so a degree-3
+scene is not planned as if it cost as little as a degree-1 one.
 
 #### `deviceClass` (string, optional) {#deviceclass}
 
@@ -140,6 +161,45 @@ Forces a device-class preset instead of detecting one. One of `'desktop'`, `'int
 - Default: `6`
 
 Page fetches allowed to run at once while streaming.
+
+### Where detail goes
+
+These three are **streaming only**. `foveation` and `distanceFalloff` divide a node's projected
+error before it is compared with `maximumScreenSpaceError`. The residency budget is planned against
+that same weighted error, so they decide which part of the view the budget is spent on, not only
+the order pages load in. `motionErrorScale` changes only what is requested, never what is drawn.
+
+#### `foveation` (object | null, optional) {#foveation}
+
+- Default: `{radius: 0.3, strength: 1}`
+
+Detail concentrated around a gaze position. `center` is viewport-normalized and defaults to
+`[0.5, 0.5]`. Within `radius` of it nothing changes. Beyond that, error is divided by
+`1 + strength * (distance - radius)`. Distance is measured to the nearest edge of a node's
+footprint, so a large node close to the camera is never treated as peripheral. `null` weights the
+whole view alike.
+
+#### `distanceFalloff` (number, optional) {#distancefalloff}
+
+- Default: `0.5`
+
+How much faster than perspective error falls off beyond the camera's target. A node `k` times
+farther than the target has its error divided by `k ^ distanceFalloff`, which keeps an oblique view
+from spending its budget on the horizon. `0` leaves distance to perspective alone.
+
+#### `motionErrorScale` (number, optional) {#motionerrorscale}
+
+- Default: `4`
+
+How much coarser than `maximumScreenSpaceError` a page may be before it is requested while the
+camera moves. `1` disables it. Only loading is affected. Detail that is already resident keeps being
+drawn at full resolution. Ground whose finer pages have not loaded shows its coarser resident
+ancestor until the camera settles. Pages already in flight are not cancelled.
+
+The layer measures how fast the scene at the camera's target sweeps across the screen and scales
+the threshold in proportion. It stays at 1× for a still or slowly orbiting camera. The level holds
+for a quarter second through the pauses of a gesture, then recovers over a few hundred
+milliseconds.
 
 ### Anti-popping
 
@@ -179,11 +239,17 @@ Longest a departed page is held waiting for its replacements, in milliseconds. A
 a timing: the hold normally ends when the replacements are up, which after a large camera move can
 take a second or two. Past this it is blurring finished ground for something that is not coming.
 
+Held pages are kept resident, so they are also bounded by size: once they exceed an eighth of the
+residency budget, the longest-held give up their hold early and fade out, so that a large camera
+move cannot leave the whole previous frontier occupying the room the new one needs.
+
 ### Placement
 
-#### `coordinateOrigin` ([number, number, number], required) {#coordinateorigin}
+#### `coordinateOrigin` ([number, number, number], optional) {#coordinateorigin}
 
-`[longitude, latitude, altitudeMeters]` the scene is pinned to.
+- Default: `[0, 0, 0]`
+
+`[longitude, latitude, altitudeMeters]` the scene is pinned to. `coordinateSystem` is ignored.
 
 #### `sizeMeters` (number, optional) {#sizemeters}
 
@@ -284,6 +350,8 @@ noise that needs temporal accumulation to resolve.
 
 #### `radiusScale`, `alphaScale`, `exposure`, `alphaCutoff` (number, optional)
 
+- Defaults: `1`, `1`, `1`, `0.5 / 255`
+
 Multipliers on each Gaussian's support radius, its decoded opacity, its linear radiance before
 display tone mapping, and the minimum fragment opacity retained after attenuation.
 
@@ -305,13 +373,20 @@ off so splats do not occlude each other.
 
 ### Picking
 
+Picking is **WebGPU only**. The layer takes part in deck.gl's color picking; deck.gl's depth
+picking (`pickZ`, as used by `pickObject` with `unproject3D`) is not supported and skips the layer.
+
 #### `pickingAlphaThreshold` (number, optional) {#pickingalphathreshold}
 
-- Default: `0.5`
+- Default: `0`
 
-Minimum coverage a Gaussian must reach at a pixel to be pickable there. Picking a volumetric
-primitive by first hit is genuinely ambiguous: the 3σ border of a large, nearly transparent Gaussian
-can sit in front of a small opaque one while contributing almost nothing to the pixel.
+Minimum coverage a Gaussian must reach at a pixel to be pickable there. At the default picking
+follows `alphaCutoff`: whatever is drawn at a pixel can be picked there.
+
+Picking a volumetric primitive by first hit is genuinely ambiguous: the 3σ border of a large, nearly
+transparent Gaussian can sit in front of a small opaque one while contributing almost nothing to
+the pixel. Raising this makes such borders transparent to picking, at the cost of making Gaussians
+whose opacity never reaches it unpickable anywhere.
 
 With `pickable: true`, the picking info carries `splatBatchIndex`, `splatBatchRowIndex` and
 `splatSemanticId` alongside the usual fields.

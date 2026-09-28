@@ -3,27 +3,51 @@
 // Copyright (c) vis.gl contributors
 
 import {test, expect} from 'vitest';
-import {WgslReflect} from 'wgsl_reflect';
+import {WgslExec, WgslParser, WgslReflect} from 'wgsl_reflect';
 
 import {Layer} from '@deck.gl/core';
+import type {Viewport} from '@deck.gl/core';
+// Internal to the package, so imported from source rather than from its public entry point.
+import PickLayersPass from '../../../modules/core/src/passes/pick-layers-pass';
 import {
+  getSplatPickingParameters,
   SPLAT_COMPATIBLE_PICKING_SHADER,
   SPLAT_COMPATIBLE_PICKING_SHADER_LAYOUT,
+  SPLAT_PICKING_COLOR_WGSL,
   SPLAT_PICKING_SHADER,
   SPLAT_PICKING_SHADER_LAYOUT
-} from '@deck.gl/splat-layers';
+} from '../../../modules/splat-layers/src/splat-picking-shader';
 
-/** Reproduces the shader's encoding so the two can be compared directly. */
-function encodeInShader(rowIndex: number): [number, number, number] {
-  if (rowIndex >= 16777215) {
-    return [0, 0, 0];
-  }
-  const encoded = rowIndex + 1;
-  return [
-    Math.round((((encoded & 255) / 255) * 255) as number),
-    Math.round(((((encoded >> 8) & 255) / 255) * 255) as number),
-    Math.round(((((encoded >> 16) & 255) / 255) * 255) as number)
-  ];
+/**
+ * Runs the picking shader's own `getSplatPickingColor` on the CPU, through a WGSL interpreter.
+ *
+ * The function is executed from the exact source string the picking pipelines compile, wrapped in
+ * a one-line compute kernel, so what is compared below is the shader's behaviour rather than a
+ * JavaScript restatement of it.
+ */
+function encodeInShader(rowIndices: number[]): [number, number, number, number][] {
+  const source = `${SPLAT_PICKING_COLOR_WGSL}
+@group(0) @binding(0) var<storage, read> rows: array<u32>;
+@group(0) @binding(1) var<storage, read_write> colors: array<vec4<f32>>;
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  colors[id.x] = getSplatPickingColor(rows[id.x]);
+}`;
+  const rows = new Uint32Array(rowIndices);
+  const colors = new Float32Array(rowIndices.length * 4);
+  new WgslExec(new WgslParser().parse(source)).dispatchWorkgroups('main', rowIndices.length, {
+    0: {0: rows, 1: colors}
+  });
+  // What an `rgba8unorm` attachment stores for each channel.
+  return rowIndices.map(
+    (_, index) =>
+      Array.from(colors.subarray(index * 4, index * 4 + 4), value => Math.round(value * 255)) as [
+        number,
+        number,
+        number,
+        number
+      ]
+  );
 }
 
 class ProbeLayer extends Layer {
@@ -33,15 +57,58 @@ class ProbeLayer extends Layer {
 
 test('SplatPickingShader#the shader encodes exactly what deck.gl decodes', () => {
   // Sharing an encoding across a CPU function and a shader is the kind of thing that stays correct
-  // right up until one of them changes, so this compares them rather than restating either.
+  // right up until one of them changes, so this runs the shader and compares it with deck.gl.
   const layer = new ProbeLayer({id: 'probe'});
-  for (const rowIndex of [0, 1, 254, 255, 256, 65535, 65536, 16777213]) {
-    expect(encodeInShader(rowIndex), `row ${rowIndex}`).toEqual(layer.encodePickingColor(rowIndex));
-  }
+  const rowIndices = [0, 1, 254, 255, 256, 65535, 65536, 16777213];
+  const encoded = encodeInShader(rowIndices);
+  rowIndices.forEach((rowIndex, index) => {
+    const [r, g, b] = encoded[index];
+    expect([r, g, b], `row ${rowIndex} encodes as deck does`).toEqual(
+      layer.encodePickingColor(rowIndex)
+    );
+    expect(layer.decodePickingColor(new Uint8Array([r, g, b])), `and decodes back`).toBe(rowIndex);
+  });
+  const [r, g, b] = encodeInShader([16777215])[0];
   expect(
-    encodeInShader(16777215),
+    [r, g, b],
     'and a row past what 24 bits can carry reports nothing rather than aliasing onto another row'
   ).toEqual([0, 0, 0]);
+});
+
+test('SplatPickingShader#the picking pipeline keeps deck.gl picking blend contract', () => {
+  // deck.gl tells pickable layers apart by alpha, written through a blend constant. Run its own
+  // picking pass's parameter logic for a pickable layer, then check the splat picking pipeline
+  // keeps the part of it that carries the layer's identity.
+  const pickLayersPass = new PickLayersPass({type: 'webgpu'} as never, {id: 'pick'});
+  const passInternals = pickLayersPass as unknown as {
+    _resetColorEncoder(pickZ: boolean): unknown;
+    getLayerParameters(layer: Layer, layerIndex: number, viewport: Viewport): object;
+  };
+  passInternals._resetColorEncoder(false);
+  const layer = {props: {parameters: {}, pickable: true, operation: 'draw'}} as unknown as Layer;
+  const deckParameters = passInternals.getLayerParameters(layer, 0, {id: 'main'} as Viewport);
+  const parameters = getSplatPickingParameters(deckParameters) as Record<string, unknown>;
+
+  expect(parameters.blend, 'blending on, or the constant never reaches the target').toBe(true);
+  for (const name of [
+    'blendColorOperation',
+    'blendColorSrcFactor',
+    'blendColorDstFactor',
+    'blendAlphaOperation',
+    'blendAlphaSrcFactor',
+    'blendAlphaDstFactor'
+  ]) {
+    expect(parameters[name], `${name} is deck's`).toBe(
+      (deckParameters as Record<string, unknown>)[name]
+    );
+  }
+  expect(parameters.blendAlphaSrcFactor, 'so alpha comes from the blend constant').toBe('constant');
+  expect(
+    'blendConstant' in parameters,
+    'which is dynamic render-pass state, set by deck, not a pipeline parameter'
+  ).toBe(false);
+  expect(parameters.depthWriteEnabled, 'the nearest covered Gaussian wins the pixel').toBe(true);
+  expect(parameters.depthCompare).toBe('less-equal');
 });
 
 test('SplatPickingShader#both variants parse and expose one vertex and one fragment entry', () => {

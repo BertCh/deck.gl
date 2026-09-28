@@ -5,3 +5,4 @@
 import './splat-device-budgets.spec';
 import './splat-clip-extension.spec';
 import './splat-picking-shader.spec';
+import './splat-layer.spec';

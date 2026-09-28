@@ -42,10 +42,14 @@
  *
  * It is not the caller's. Pages on the streaming path are produced by the hierarchy's own page
  * loader and owned by the layer's residency manager, which destroys them on eviction; nothing
- * outside the layer holds a reference. The original values are snapshotted before the first write
- * so a page that fades out and comes back is restored exactly, and a page whose opacities are all
- * the same value - which every page baked from a raster grid is - is recognized and costs no
- * snapshot at all.
+ * outside the layer holds a reference. The original values are snapshotted before the first write,
+ * and a page whose opacities are all the same value - which every page baked from a raster grid is
+ * - is recognized and costs no snapshot at all.
+ *
+ * The write goes through to the page's CPU mirror as well as its GPU column, so a ramp that reaches
+ * zero leaves a page whose `source.opacities` read as all zeros. The controller therefore writes
+ * the snapshot back before it forgets a page: a page that is still resident when the traversal asks
+ * for it again must be read back at its real opacity, or it would ramp up to nothing.
  */
 
 /**
@@ -73,6 +77,7 @@ export type SplatFadeEntry<TBatch extends SplatFadeBatch = SplatFadeBatch> = {
   batch: TBatch;
 };
 
+/** Timing of the ramps a {@link SplatFadeController} runs. */
 export type SplatFadeControllerProps = {
   /** Milliseconds a page appearing over nothing takes to reach full opacity. */
   fadeInDuration: number;
@@ -94,6 +99,16 @@ export type SplatFadeControllerProps = {
   holdDuration: number;
   /** Quantization levels a ramp is written in. */
   fadeSteps?: number;
+  /**
+   * Most splats that may be held for their replacements at once. Unbounded when omitted.
+   *
+   * Held pages stay resident, and a caller that pins them so the hold can finish is spending
+   * residency the traversal would otherwise plan into. After a large camera move the whole previous
+   * frontier can be held at once, which would starve the new one of room for as long as the
+   * backstop runs. Past this bound the longest-held pages give up their hold early and start
+   * fading out, so the share of residency held pages occupy stays bounded.
+   */
+  maxHeldSplats?: number;
 };
 
 /** Per-page ramp state. */
@@ -140,7 +155,7 @@ const ALPHA_EPSILON = 1e-6;
  * Scratch the ramp writes through, grown to the largest page seen and never shrunk.
  *
  * Module scope rather than per controller: a page write is fully consumed inside
- * `updateRows`, so there is never more than one live at a time, and a layer per view sharing one
+ * `updateRows`, so there is never more than one live at a time, and several layers sharing one
  * buffer is the point.
  */
 let opacityScratch = new Float32Array(0);
@@ -199,6 +214,10 @@ export class SplatFadeController<TBatch extends SplatFadeBatch = SplatFadeBatch>
     return count;
   }
 
+  /**
+   * Replaces the ramp timing. Ramps already in flight continue from where they are at the new rate;
+   * nothing is rewritten until the next {@link advance}.
+   */
   setProps(props: SplatFadeControllerProps): void {
     this.props = {fadeSteps: DEFAULT_FADE_STEPS, ...props};
   }
@@ -287,6 +306,7 @@ export class SplatFadeController<TBatch extends SplatFadeBatch = SplatFadeBatch>
     const {fadeInDuration, fadeOutDuration, holdDuration} = this.props;
     let animating = false;
     let drawListChanged = false;
+    this._releaseExcessHolds();
 
     for (const state of this.states.values()) {
       if (state.batch.destroyed) {
@@ -327,6 +347,9 @@ export class SplatFadeController<TBatch extends SplatFadeBatch = SplatFadeBatch>
         this._write(state);
       }
       if (state.target === 0 && state.alpha === 0) {
+        // Leaves the draw list below, so restoring now shows nothing - but a page that is still
+        // resident when the traversal asks for it again is read back from these values.
+        this._restore(state);
         this.states.delete(state.batch);
         if (this.byNodeId.get(state.id) === state) {
           this.byNodeId.delete(state.id);
@@ -370,10 +393,7 @@ export class SplatFadeController<TBatch extends SplatFadeBatch = SplatFadeBatch>
    */
   reset(): void {
     for (const state of this.states.values()) {
-      if (!state.batch.destroyed && state.written !== this.props.fadeSteps) {
-        state.alpha = 1;
-        this._write(state);
-      }
+      this._restore(state);
     }
     this.states.clear();
     this.byNodeId.clear();
@@ -411,6 +431,47 @@ export class SplatFadeController<TBatch extends SplatFadeBatch = SplatFadeBatch>
       holdFor: null,
       heldSince: 0
     };
+  }
+
+  /** Writes a page's original opacities back, unless it is already there or has been destroyed. */
+  private _restore(state: SplatFadeState<TBatch>): void {
+    if (!state.batch.destroyed && state.written !== this.props.fadeSteps) {
+      state.alpha = 1;
+      this._write(state);
+    }
+  }
+
+  /**
+   * Ends the longest-running holds early while held pages exceed `maxHeldSplats`.
+   *
+   * Oldest first, because those are the pages closest to the backstop anyway and the ones whose
+   * replacements are least likely to still be coming.
+   */
+  private _releaseExcessHolds(): void {
+    const {maxHeldSplats} = this.props;
+    if (maxHeldSplats === undefined) {
+      return;
+    }
+    let heldSplats = 0;
+    const held: SplatFadeState<TBatch>[] = [];
+    for (const state of this.states.values()) {
+      if (state.held && !state.batch.destroyed) {
+        heldSplats += state.batch.length;
+        held.push(state);
+      }
+    }
+    if (heldSplats <= maxHeldSplats) {
+      return;
+    }
+    held.sort((first, second) => first.heldSince - second.heldSince);
+    for (const state of held) {
+      if (heldSplats <= maxHeldSplats) {
+        break;
+      }
+      state.held = false;
+      state.holdFor = null;
+      heldSplats -= state.batch.length;
+    }
   }
 
   /** Writes a ramp's current level into the page's opacity rows, if it moved a whole step. */

@@ -51,6 +51,7 @@
   "peerDependencies": {
     "@deck.gl/core": "~9.4.0",
     "@luma.gl/core": "~9.4.0",
-    "@luma.gl/engine": "~9.4.0"
+    "@luma.gl/engine": "~9.4.0",
+    "@luma.gl/splats": "~9.4.0"
   }
 }

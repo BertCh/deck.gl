@@ -4,8 +4,12 @@
 
 import {test, expect} from 'vitest';
 
-import {SplatFadeController} from '@deck.gl/splat-layers';
-import type {SplatFadeBatch, SplatFadeEntry} from '@deck.gl/splat-layers';
+// Internal to the package, so imported from source rather than from its public entry point.
+import {SplatFadeController} from '../../../modules/splat-layers/src/splat-fade-controller';
+import type {
+  SplatFadeBatch,
+  SplatFadeEntry
+} from '../../../modules/splat-layers/src/splat-fade-controller';
 
 /**
  * A page that records what the ramp wrote into it.
@@ -39,17 +43,28 @@ class FakeBatch implements SplatFadeBatch {
   get current(): number[] {
     return Array.from(this.source.opacities);
   }
+
+  /** The lowest opacity level the ramp ever wrote, per row. */
+  get lowest(): number[] {
+    return this.writes.reduce(
+      (lowest, write) => lowest.map((value, index) => Math.min(value, write[index])),
+      this.current
+    );
+  }
 }
 
 function entry(id: string, ancestorIds: string[], batch: FakeBatch): SplatFadeEntry<FakeBatch> {
   return {id, ancestorIds, batch};
 }
 
-function makeController(overrides: {fadeIn?: number; fadeOut?: number; hold?: number} = {}) {
+function makeController(
+  overrides: {fadeIn?: number; fadeOut?: number; hold?: number; maxHeldSplats?: number} = {}
+) {
   return new SplatFadeController<FakeBatch>({
     fadeInDuration: overrides.fadeIn ?? 300,
     fadeOutDuration: overrides.fadeOut ?? 150,
-    holdDuration: overrides.hold ?? 2000
+    holdDuration: overrides.hold ?? 2000,
+    ...(overrides.maxHeldSplats === undefined ? {} : {maxHeldSplats: overrides.maxHeldSplats})
   });
 }
 
@@ -124,7 +139,7 @@ test('SplatFadeController#a replaced parent is held at full opacity, never cross
   expect(controller.getAlpha(childB)).toBe(1);
 
   now = run(controller, now, 200);
-  expect(parent.current, 'only then does the parent go').toEqual([0, 0]);
+  expect(parent.lowest, 'only then does the parent go').toEqual([0, 0]);
   expect(controller.drawList.includes(parent), 'and stops being drawn').toBe(false);
   expect(controller.drawList).toEqual([childA, childB]);
 });
@@ -148,7 +163,7 @@ test('SplatFadeController#a page that nothing replaced fades immediately', () =>
   );
 
   now = run(controller, now, 200);
-  expect(onScreen.current, 'and reaches zero').toEqual([0]);
+  expect(onScreen.lowest, 'and reaches zero').toEqual([0]);
   expect(controller.drawList).toEqual([elsewhere]);
 });
 
@@ -171,7 +186,7 @@ test('SplatFadeController#a hold gives up after the backstop rather than waiting
   expect(parent.current, 'and still at the opacity it had').toEqual([1]);
 
   now = run(controller, now, 500);
-  expect(parent.current[0] < 1, `released after the backstop, got ${parent.current[0]}`).toBe(true);
+  expect(parent.lowest[0] < 1, `released after the backstop, got ${parent.lowest[0]}`).toBe(true);
 });
 
 test('SplatFadeController#a page asked for again turns round instead of restarting', () => {
@@ -279,7 +294,7 @@ test('SplatFadeController#a merge holds the finer pages for their coarse replace
   now = run(controller, now, 250);
   expect(controller.getAlpha(parent)).toBe(1);
   now = run(controller, now, 200);
-  expect(child.current, 'and only then does the child go').toEqual([0]);
+  expect(child.lowest, 'and only then does the child go').toEqual([0]);
 });
 
 test('SplatFadeController#the draw list is the frontier followed by what is leaving it', () => {
@@ -297,4 +312,62 @@ test('SplatFadeController#the draw list is the frontier followed by what is leav
     'frontier order first, so a settled list compares equal and costs nothing'
   ).toEqual([childA, childB, parent]);
   expect(controller.lingeringCount).toBe(1);
+});
+
+test('SplatFadeController#a page that faded out fully comes back at its real opacity', () => {
+  const controller = makeController();
+  // Non-uniform, so a snapshot taken from a zeroed mirror could not pass by accident.
+  const page = new FakeBatch([0.5, 1]);
+  const other = new FakeBatch([1, 1]);
+
+  controller.sync([entry('a', [], page)], 0);
+  let now = run(controller, 0, 400);
+
+  // Culled: nothing replaces it, so it fades straight out and the controller forgets it.
+  controller.sync([entry('b', [], other)], now);
+  now = run(controller, now, 400);
+  expect(controller.drawList.includes(page), 'the page has left the draw list').toBe(false);
+  expect(page.lowest, 'after ramping all the way down').toEqual([0, 0]);
+  expect(
+    page.current,
+    'and its CPU mirror is written back, because the page is still resident'
+  ).toEqual([0.5, 1]);
+
+  // The traversal asks for the same resident page again. The snapshot is taken from the mirror,
+  // so a mirror left at zero would ramp the page up to nothing and leave it invisible for good.
+  controller.sync([entry('a', [], page), entry('b', [], other)], now);
+  run(controller, now, 400);
+  expect(page.current, 'it ramps back up to what it arrived with').toEqual([0.5, 1]);
+});
+
+test('SplatFadeController#held pages past maxHeldSplats give up their hold early', () => {
+  const controller = makeController({maxHeldSplats: 2, hold: 10_000});
+  const parentA = new FakeBatch([1, 1]);
+  const parentB = new FakeBatch([1, 1]);
+  const children = [0, 1].map(() => new FakeBatch([1]));
+
+  controller.sync([entry('a', [], parentA)], 0);
+  let now = run(controller, 0, 400);
+  controller.sync([entry('a', [], parentA), entry('b', [], parentB)], now);
+  now = run(controller, now, 400);
+
+  // Both parents refine at once, and the children stall - a large camera move over a slow network.
+  controller.setProps({
+    fadeInDuration: 1e9,
+    fadeOutDuration: 150,
+    holdDuration: 10_000,
+    maxHeldSplats: 2
+  });
+  controller.sync([entry('a/0', ['a'], children[0])], now);
+  now = run(controller, now, 32);
+  controller.sync([entry('a/0', ['a'], children[0]), entry('b/0', ['b'], children[1])], now);
+  now = run(controller, now, 300);
+
+  expect(
+    parentA.lowest,
+    'the longest-held page gives up its hold rather than starving the new frontier'
+  ).toEqual([0, 0]);
+  expect(controller.getAlpha(parentB), 'while the most recent hold, within the bound, stays').toBe(
+    1
+  );
 });

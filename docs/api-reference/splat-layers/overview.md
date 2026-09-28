@@ -4,8 +4,6 @@ Renders 3D Gaussian splat scenes — radiance-field captures — as deck.gl laye
 composited with the rest of your layer stack.
 
 ```bash
-npm install deck.gl @luma.gl/splats
-# or
 npm install @deck.gl/core @deck.gl/splat-layers @luma.gl/splats
 ```
 
@@ -16,6 +14,9 @@ import {SplatLayer} from '@deck.gl/splat-layers';
 > This module is not bundled into the `deck.gl` umbrella package. Splat rendering is WebGPU-first
 > and carries `@luma.gl/splats` as a dependency, so it is installed deliberately rather than by
 > default.
+>
+> It also calls `@luma.gl/splats` APIs that are not in a published luma.gl release yet. Until they
+> are, build it against the luma.gl `deck-splat-layers` branch.
 
 ## Layers
 
@@ -42,7 +43,7 @@ A Gaussian splat is a volume, not a point, and almost everything below follows f
   what keeps a scene from getting brighter as you zoom out.
 - **Picking it is ambiguous.** The faint outer edge of a large, nearly transparent splat routinely
   sits in front of a small opaque one. `pickingAlphaThreshold` decides how much coverage a splat
-  needs before it can claim a pixel.
+  needs before it can claim a pixel. Picking is WebGPU only.
 - **Clipping it by center looks wrong.** A splat straddling a clip plane would either vanish whole
   or survive whole. `SplatClipExtension` measures the distance in units of each splat's own extent
   instead.

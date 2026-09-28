@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import {Layer} from '@deck.gl/core';
+import {Layer, log} from '@deck.gl/core';
 import type {
   DefaultProps,
   GetPickingInfoParams,
@@ -12,7 +12,15 @@ import type {
   UpdateParameters,
   Viewport
 } from '@deck.gl/core';
-import type {Buffer, CompareFunction, Device} from '@luma.gl/core';
+import type {
+  Buffer,
+  CompareFunction,
+  Device,
+  RenderPass,
+  RenderPipelineParameters,
+  TextureFormatColor,
+  TextureFormatDepthStencil
+} from '@luma.gl/core';
 import {Model} from '@luma.gl/engine';
 import {Matrix4} from '@math.gl/core';
 import {
@@ -29,6 +37,7 @@ import {
   type SplatClipRegion,
   type SplatDepthKeyMode,
   type SplatFragmentKernel,
+  type SplatHierarchyFoveation,
   type SplatHierarchyFrontierEntry,
   type SplatHierarchyNode,
   type SplatHierarchyPageLoader,
@@ -39,63 +48,27 @@ import {
   type SplatSource
 } from '@luma.gl/splats';
 import {
+  applySplatBudgetOverrides,
+  getSplatCountForGpuBytes,
   getSplatDeviceBudget,
+  RESIDENT_BYTES_PER_SPLAT,
   SPLAT_DEVICE_BUDGETS,
   type SplatDeviceClass
 } from './splat-device-budgets';
-import {SplatFadeController, type SplatFadeEntry} from './splat-fade-controller';
+import SplatClipExtension from './splat-clip-extension';
+import {SplatMotionDetail} from './splat-motion-detail';
 import {
+  SplatFadeController,
+  type SplatFadeControllerProps,
+  type SplatFadeEntry
+} from './splat-fade-controller';
+import {
+  getSplatPickingParameters,
   SPLAT_COMPATIBLE_PICKING_SHADER,
   SPLAT_COMPATIBLE_PICKING_SHADER_LAYOUT,
   SPLAT_PICKING_SHADER,
   SPLAT_PICKING_SHADER_LAYOUT
 } from './splat-picking-shader';
-
-/**
- * Renders a Gaussian splat scene as a first-class deck.gl layer.
- *
- * Both backends record into the render pass deck.gl already opened for the layer stack, so with
- * `depthCompare` enabled and depth writes disabled, opaque geometry drawn by earlier layers - a
- * `TerrainLayer` mesh, for example - occludes splats behind it, while the splats stay correctly
- * ordered among themselves through a global depth sort.
- *
- * **WebGPU.** Projection, culling, the global radix depth sort, spherical-harmonic radiance and the
- * indirect draw all run as GPU compute over borrowed source buffers. That work is recorded in the
- * layer's {@link SplatLayer.compute} stage, on deck.gl's own encoder, immediately before the render
- * pass that consumes it - so there is no extra submission, no hand-written synchronization, and in
- * a multi-view frame each camera gets its own depth order.
- *
- * **WebGL2.** The fallback. WebGL2 has no storage buffers, so the sorted order has to be
- * materialized by physically permuting every source attribute, and luma.gl's GLSL splat shader has
- * no spherical-harmonic evaluation, so any degree above 0 is evaluated per splat on the CPU
- * whenever the camera moves. Both costs are linear in the splat count and both land on the main
- * thread. This path is usable; it is not fast, and the residency budget exists for it.
- *
- * ## Two ways to give it a scene
- *
- * **`splatSource`** is a scene that is already decoded and fully resident. Everything is uploaded
- * once, the renderer's capacity is reserved for exactly that many rows, and nothing changes after
- * the first frame.
- *
- * **`splatHierarchy`** is a level-of-detail tree that streams. `SplatHierarchyManager` walks it
- * against the camera each frame and hands back the set of batches that should be drawn;
- * `SplatResidencyManager` bounds what stays on the GPU and evicts by priority. Two things make
- * that affordable:
- *
- * 1. **Capacity is reserved up front.** The graph renderer compiles a command graph sized to
- *    `expectedSplatCount` and `expectedBatchCount` and reuses it for any batch list that fits - so
- *    a frontier that gains, loses and reorders pages every frame costs one buffer of pointers
- *    rather than a graph rebuild. Reserve for the residency ceiling and the churn is free.
- * 2. **The traversal runs in the layer's own space.** Screen-space error is measured from the
- *    camera position and the node bounds, in the scene's arbitrary units; the layer already builds
- *    the matrix that maps those onto the map, and its inverse, so it feeds the traversal a
- *    scene-local camera and the error comes out in real screen pixels.
- *
- * The residency manager is owned by the layer rather than by the hierarchy, which is what lets
- * `maximumScreenSpaceError` change without dropping a single resident page: the hierarchy takes its
- * threshold at construction, so changing it rebuilds the traversal - and a traversal rebuilt over a
- * residency window it does not own finds every page still there.
- */
 
 /** Convention describing which local axis points up in the source scene. */
 export type SplatUpAxis = 'y-down' | 'z-up';
@@ -110,8 +83,12 @@ export type SplatBackendKind = 'gpu-graph' | 'cpu-sort';
  * where they come from - an archive over HTTP, a tree already in memory, or 3D Tiles.
  */
 export type SplatHierarchySource = {
+  /** Root nodes of the tree. A source that grows mutates this and calls `subscribe`'s listener. */
   roots: readonly SplatHierarchyNode[];
-  /** Builds the loader for a device. Called once per backend, not once per page. */
+  /**
+   * Builds the loader for a device. Called once per scene - when the layer first receives this
+   * source - not once per page, and not again when the traversal is rebuilt.
+   */
   createPageLoader: (device: Device) => SplatHierarchyPageLoader;
   /** Totals used to reserve renderer capacity before anything has loaded. */
   summary: {splatCount: number; nodeCount: number};
@@ -134,7 +111,9 @@ export type SplatHierarchySource = {
 
 /** What the layer can report back about a streaming scene, for a status readout. */
 export type SplatStreamingStats = {
+  /** Traversal counters: visible, culled and frontier nodes, and page loads. */
   hierarchy: SplatHierarchyStats;
+  /** Residency counters: resident pages, splats and bytes against the budget. */
   residency: SplatResidencyStats;
   /** Rows currently drawn, which is what the depth sort actually covers. */
   drawnSplatCount: number;
@@ -161,6 +140,7 @@ export type SplatPickingInfo = PickingInfo & {
   splatSemanticId: number | null;
 };
 
+/** Props accepted by {@link SplatLayer}, on top of deck.gl's common `LayerProps`. */
 export type SplatLayerProps = {
   /**
    * Decoded, caller-owned splat columns. Several sources are uploaded as several batches and kept
@@ -172,6 +152,9 @@ export type SplatLayerProps = {
    *
    * Takes precedence over `splatSource`. The pages it loads are owned by the layer's residency
    * manager and destroyed when they are evicted.
+   *
+   * Compared by identity: a new object releases the scene and starts over, so keep one per scene.
+   * A source whose tree grows reports it through `subscribe` instead.
    */
   splatHierarchy?: SplatHierarchySource | null;
   /**
@@ -188,7 +171,9 @@ export type SplatLayerProps = {
    *
    * Defaults to a preset chosen from the device, because a splat scene has no natural size and
    * what a viewer can hold is a property of the machine rather than of the capture. Anything set
-   * here overrides the matching field of that preset.
+   * here overrides the matching field of that preset. A `maxResidentSplats` set without a
+   * `maxGpuBytes` brings the byte ceiling that splat count implies, rather than keeping the
+   * preset's.
    */
   residencyBudget?: SplatResidencyBudget | null;
   /** Forces a device-class preset instead of detecting one. */
@@ -196,11 +181,39 @@ export type SplatLayerProps = {
   /** Page fetches allowed to run at once while streaming. */
   maxConcurrentLoads?: number;
   /**
+   * Relaxes a streaming node's error by how far it sits from the gaze position, so the center of the
+   * view gets detail - and budget - before the edges. `null` treats the whole view alike.
+   *
+   * Positions are viewport-normalized, `[0.5, 0.5]` being the center. Within `radius` nothing
+   * changes; beyond it the error is divided by `1 + strength * (distance - radius)`.
+   */
+  foveation?: SplatHierarchyFoveation | null;
+  /**
+   * How much faster than perspective a streaming node's error falls off beyond the camera's target.
+   *
+   * A node `k` times farther than the target has its error divided by `k ^ distanceFalloff`. At
+   * `0` distance acts only through perspective; at `1` a distant node is held to a pixel error that
+   * grows with its distance. An oblique view spends most of its budget on the horizon otherwise.
+   */
+  distanceFalloff?: number;
+  /**
+   * How much coarser than `maximumScreenSpaceError` a page may be before it is *requested* while the
+   * camera moves. `1` disables it.
+   *
+   * Detail requested mid-motion lands after the view that asked for it, so fetching it only spends
+   * load slots on ground the camera has already left. What is drawn is untouched: resident detail
+   * keeps being drawn at full resolution, and only ground whose detail is not loaded shows its
+   * coarser resident ancestor until the camera settles. The scale follows how fast the view sweeps
+   * across the screen.
+   */
+  motionErrorScale?: number;
+  /**
    * Robust per-axis extent of the scene in source units, if the caller already knows it.
    *
-   * A streaming scene has to supply this: the layer normalizes source units onto a metre footprint
-   * from percentiles of the splat centers, and no single page of a streamed scene has seen enough
-   * of them. Ignored when `splatSource` is used, where the columns are all present.
+   * A streaming scene has to supply this unless it is `georeferenced`: the layer normalizes source
+   * units onto a metre footprint from percentiles of the splat centers, and no single page of a
+   * streamed scene has seen enough of them. A streaming scene with neither draws nothing and logs a
+   * warning. Ignored when `splatSource` is used, where the columns are all present.
    */
   scenePercentiles?: {x: [number, number]; y: [number, number]; z: [number, number]} | null;
   /**
@@ -212,8 +225,8 @@ export type SplatLayerProps = {
    * so this places it one to one and `sizeMeters` stops applying.
    */
   georeferenced?: boolean;
-  /** `[longitude, latitude, altitudeMeters]` the scene is pinned to. */
-  coordinateOrigin: [number, number, number];
+  /** `[longitude, latitude, altitudeMeters]` the scene is pinned to. Defaults to `[0, 0, 0]`. */
+  coordinateOrigin?: [number, number, number];
   /** Target horizontal footprint of the scene in meters; source units are arbitrary. */
   sizeMeters?: number;
   /** Rotation about the vertical axis, in degrees clockwise from north. */
@@ -222,13 +235,13 @@ export type SplatLayerProps = {
   upAxis?: SplatUpAxis;
   /** Highest spherical-harmonic band evaluated at render time. */
   sphericalHarmonicsDegree?: 0 | 1 | 2 | 3;
-  /** Multiplier on each Gaussian's support radius. */
+  /** Multiplier on each Gaussian's support radius. Defaults to `1`. */
   radiusScale?: number;
-  /** Multiplier on decoded opacity. */
+  /** Multiplier on decoded opacity. Defaults to `1`. */
   alphaScale?: number;
-  /** Linear radiance multiplier applied before display tone mapping. */
+  /** Linear radiance multiplier applied before display tone mapping. Defaults to `1`. */
   exposure?: number;
-  /** Minimum fragment opacity retained after Gaussian attenuation. */
+  /** Minimum fragment opacity retained after Gaussian attenuation. Defaults to `0.5 / 255`. */
   alphaCutoff?: number;
   /**
    * Screen-space antialiasing. **WebGPU only.** Defaults to `'mip-splatting'`.
@@ -286,11 +299,14 @@ export type SplatLayerProps = {
    */
   clipRegion?: SplatClipRegion | null;
   /**
-   * Minimum coverage a Gaussian must reach at a pixel to be pickable there. Defaults to `0.5`.
+   * Minimum coverage a Gaussian must reach at a pixel to be pickable there. Defaults to `0`, so
+   * picking follows `alphaCutoff`: whatever is drawn at a pixel can be picked there.
+   * **WebGPU only**, as picking is.
    *
    * Picking a volumetric primitive by first hit is genuinely ambiguous: the 3-sigma border of a
    * large, nearly transparent Gaussian can sit in front of a small opaque one while contributing
-   * almost nothing to the pixel.
+   * almost nothing to the pixel. Raising this makes such borders transparent to picking, at the
+   * cost of making Gaussians whose opacity never reaches it unpickable anywhere.
    */
   pickingAlphaThreshold?: number;
   /**
@@ -354,6 +370,9 @@ const defaultProps: DefaultProps<SplatLayerProps> = {
   residencyBudget: {type: 'object', value: null, compare: true},
   deviceClass: null,
   maxConcurrentLoads: {type: 'number', value: 6, min: 1},
+  foveation: {type: 'object', value: {radius: 0.3, strength: 1}, compare: true},
+  distanceFalloff: {type: 'number', value: 0.5, min: 0},
+  motionErrorScale: {type: 'number', value: 4, min: 1},
   scenePercentiles: {type: 'object', value: null, compare: true},
   georeferenced: false,
   coordinateOrigin: {type: 'array', value: [0, 0, 0], compare: true},
@@ -371,7 +390,7 @@ const defaultProps: DefaultProps<SplatLayerProps> = {
   depthKeyMode: 'float16',
   alphaMode: 'blend',
   clipRegion: {type: 'object', value: null, compare: true},
-  pickingAlphaThreshold: {type: 'number', value: 0.5, min: 0, max: 1},
+  pickingAlphaThreshold: {type: 'number', value: 0, min: 0, max: 1},
   screenSizeCutoffPixels: {type: 'number', value: 0, min: 0},
   // On by default, because a popping frontier is a defect rather than a preference, and the pages
   // it writes to are the layer's own. See `fadeInDuration`.
@@ -401,6 +420,13 @@ type SplatBackend =
       depthCompare: CompareFunction;
       depthWriteEnabled: boolean;
       alphaMode: GPUSplatAlphaMode;
+      /**
+       * Attachment formats the compositor's pipeline was built for, taken from the framebuffer deck.gl
+       * last drew this layer into. `undefined` until the first draw, when the compositor falls back
+       * to the device's preferred formats.
+       */
+      colorAttachmentFormat?: TextureFormatColor;
+      depthStencilAttachmentFormat?: TextureFormatDepthStencil;
       pickingModel?: Model;
       pickingSources?: {
         uniformBuffer: Buffer;
@@ -434,6 +460,9 @@ type SplatCameraCache = {
   cameraPosition: [number, number, number];
 };
 
+/** Field of view assumed for motion when the viewport reports none; the traversal's own default. */
+const DEFAULT_VERTICAL_FIELD_OF_VIEW = Math.PI / 3;
+
 /** Samples at most this many splats when estimating robust scene bounds. */
 const PLACEMENT_SAMPLE_LIMIT = 50_000;
 
@@ -450,6 +479,61 @@ const CPU_SPHERICAL_HARMONICS_MOVE_FRACTION = 0.02;
 /** The 2nd and 98th percentile of each axis of the splat centers, in source units. */
 type ScenePercentiles = {x: [number, number]; y: [number, number]; z: [number, number]};
 
+/**
+ * Renders a Gaussian splat scene as a first-class deck.gl layer.
+ *
+ * Both backends record into the render pass deck.gl already opened for the layer stack, so with
+ * `depthCompare` enabled and depth writes disabled, opaque geometry drawn by earlier layers - a
+ * `TerrainLayer` mesh, for example - occludes splats behind it, while the splats stay correctly
+ * ordered among themselves through a global depth sort.
+ *
+ * **WebGPU.** Projection, culling, the global radix depth sort, spherical-harmonic radiance and the
+ * indirect draw all run as GPU compute over borrowed source buffers. That work is recorded in the
+ * layer's {@link SplatLayer.compute} stage, on deck.gl's own encoder, immediately before the render
+ * pass that consumes it - so there is no extra submission and no hand-written synchronization.
+ * Picking participates in deck.gl's own picking pass, and is WebGPU only.
+ *
+ * **WebGL2.** The fallback. WebGL2 has no storage buffers, so the sorted order has to be
+ * materialized by physically permuting every source attribute, and luma.gl's GLSL splat shader has
+ * no spherical-harmonic evaluation, so any degree above 0 is evaluated per splat on the CPU
+ * whenever the camera moves. Both costs are linear in the splat count and both land on the main
+ * thread. This path is usable; it is not fast, and the residency budget exists for it. It is not
+ * pickable.
+ *
+ * **One view.** The layer owns one renderer, one traversal and one set of camera uniforms, so it
+ * draws into a single viewport per frame: the first one it is drawn in. Other viewports skip it
+ * rather than re-sorting and re-traversing for each camera in turn, which would thrash both. Use
+ * `layerFilter` to choose the view; for several views, one layer per view, each routed by
+ * `layerFilter`.
+ *
+ * **Placement.** The scene is positioned by `coordinateOrigin`, `heading` and the normalization
+ * described under `georeferenced`; `coordinateSystem` is ignored.
+ *
+ * ## Two ways to give it a scene
+ *
+ * **`splatSource`** is a scene that is already decoded and fully resident. Everything is uploaded
+ * once, the renderer's capacity is reserved for exactly that many rows, and nothing changes after
+ * the first frame.
+ *
+ * **`splatHierarchy`** is a level-of-detail tree that streams. `SplatHierarchyManager` walks it
+ * against the camera each frame and hands back the set of batches that should be drawn;
+ * `SplatResidencyManager` bounds what stays on the GPU and evicts by priority. Two things make
+ * that affordable:
+ *
+ * 1. **Capacity is reserved up front.** The graph renderer compiles a command graph sized to
+ *    `expectedSplatCount` and `expectedBatchCount` and reuses it for any batch list that fits - so
+ *    a frontier that gains, loses and reorders pages every frame costs one buffer of pointers
+ *    rather than a graph rebuild. Reserve for the residency ceiling and the churn is free.
+ * 2. **The traversal runs in the layer's own space.** Screen-space error is measured from the
+ *    camera position and the node bounds, in the scene's arbitrary units; the layer already builds
+ *    the matrix that maps those onto the map, and its inverse, so it feeds the traversal a
+ *    scene-local camera and the error comes out in real screen pixels.
+ *
+ * The residency manager is owned by the layer rather than by the hierarchy, which is what lets
+ * `maximumScreenSpaceError` change without dropping a single resident page: the hierarchy takes its
+ * threshold at construction, so changing it rebuilds the traversal - and a traversal rebuilt over a
+ * residency window it does not own finds every page still there.
+ */
 export default class SplatLayer extends Layer<SplatLayerProps> {
   static layerName = 'SplatLayer';
   static defaultProps = defaultProps;
@@ -460,6 +544,8 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     backend?: SplatBackend;
     placement?: SplatPlacement;
     camera: SplatCameraCache;
+    /** Camera-motion coarsening fed to the traversal each frame. */
+    motionDetail: SplatMotionDetail;
     /** The streaming traversal, rebuilt whenever its error threshold changes. */
     hierarchy?: SplatHierarchyManager;
     /**
@@ -490,15 +576,34 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     frontierBatches: Set<GPUSplatData>;
     /** Drops the growing-source listener. See `SplatHierarchySource.subscribe`. */
     unsubscribeRoots?: () => void;
+    /** The streaming source's page loader, built once per scene and reused across traversals. */
+    pageLoader?: SplatHierarchyPageLoader;
+    /**
+     * Bytes per resident splat the current traversal's selection budget was planned with.
+     *
+     * The traversal is rebuilt when what resident pages actually cost drifts far from this. See
+     * `_resolveSelectionBudget`.
+     */
+    plannedBytesPerSplat: number;
     /** Timestamp the ramps were last advanced to. */
     lastFadeTime: number;
+    /** The one viewport the layer renders into. See the class comment. */
+    primaryViewportId?: string;
+    /** Other viewports seen since the primary one last was, to notice it going away. */
+    viewportsSincePrimary: Set<string>;
+    /** Whether the "streaming scene cannot be placed" warning has already been logged. */
+    warnedMissingPlacement: boolean;
   };
 
-  /** Only the WebGPU backend has compute work; the WebGL2 fallback does everything in `draw`. */
+  /**
+   * Only the WebGPU backend has compute work of its own; the WebGL2 fallback does everything in
+   * `draw`. Extensions that compute keep running either way.
+   */
   get needsComputePass(): boolean {
-    return this.state?.backend?.kind === 'gpu-graph';
+    return super.needsComputePass || this.state?.backend?.kind === 'gpu-graph';
   }
 
+  /** Sets up empty scene state; nothing is uploaded until `updateState` sees a scene. */
   initializeState(): void {
     this.setState({
       splatData: [],
@@ -507,6 +612,10 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       pinnedLingering: new Set(),
       frontierBatches: new Set(),
       lastFadeTime: 0,
+      plannedBytesPerSplat: RESIDENT_BYTES_PER_SPLAT,
+      viewportsSincePrimary: new Set(),
+      warnedMissingPlacement: false,
+      motionDetail: new SplatMotionDetail(),
       camera: {
         modelMatrix: new Matrix4(),
         inverseModelMatrix: new Matrix4(),
@@ -520,13 +629,30 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     });
   }
 
+  /**
+   * Rebuilds only what changed: a new scene releases the old one, traversal inputs rebuild the
+   * traversal over the same residency window, and everything else is forwarded to the renderer.
+   */
   updateState(params: UpdateParameters<this>): void {
     const {props, oldProps, changeFlags} = params;
 
+    if (
+      changeFlags.extensionsChanged &&
+      !props.extensions.some(extension => extension instanceof SplatClipExtension)
+    ) {
+      // Extensions have no teardown hook of their own when removed, so the region a removed
+      // `SplatClipExtension` resolved would otherwise keep clipping. Extensions update after this,
+      // so one that is still attached rebuilds it.
+      this.state.clipRegion = undefined;
+    }
+
     const hierarchyChanged = props.splatHierarchy !== oldProps.splatHierarchy;
     const sourceChanged = changeFlags.dataChanged || props.splatSource !== oldProps.splatSource;
+    const sceneChanged = hierarchyChanged || (sourceChanged && !props.splatHierarchy);
+    // A traversal is rebuilt at most once per update, however many of its inputs changed.
+    let traversalNeedsRebuild = false;
 
-    if (hierarchyChanged || (sourceChanged && !props.splatHierarchy)) {
+    if (sceneChanged) {
       this._releaseScene();
       if (props.splatHierarchy) {
         this._createStreamingScene(props.splatHierarchy);
@@ -538,10 +664,11 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     } else if (
       props.splatHierarchy &&
       (props.maximumScreenSpaceError !== oldProps.maximumScreenSpaceError ||
-        props.maxConcurrentLoads !== oldProps.maxConcurrentLoads)
+        props.maxConcurrentLoads !== oldProps.maxConcurrentLoads ||
+        props.distanceFalloff !== oldProps.distanceFalloff)
     ) {
       // Rebuilt over the layer's own residency window, so every loaded page survives it.
-      this._createTraversal();
+      traversalNeedsRebuild = true;
     }
 
     if (
@@ -553,16 +680,13 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       const wantsFades = Boolean(props.fadeInDuration || props.fadeOutDuration);
       if (fade && !wantsFades) {
         // Turned off mid-scene: every ramp is restored to the opacities its page arrived with, and
-        // the next frontier change hands the renderer the frontier itself.
+        // the renderer is handed the frontier itself.
         fade.reset();
         this.setState({fade: undefined});
+        this._releaseLingeringPins();
         this._submitDrawList(Array.from(this.state.frontierBatches));
       } else if (fade) {
-        fade.setProps({
-          fadeInDuration: props.fadeInDuration!,
-          fadeOutDuration: props.fadeOutDuration!,
-          holdDuration: props.fadeHoldDuration!
-        });
+        fade.setProps(this._getFadeControllerProps());
       } else if (wantsFades && props.splatHierarchy) {
         this.setState({fade: this._createFadeController()});
       }
@@ -575,7 +699,13 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
         props.deviceClass !== oldProps.deviceClass)
     ) {
       this.state.residency.setBudget(this._resolveResidencyBudget());
-      this.setNeedsRedraw();
+      this.state.fade?.setProps(this._getFadeControllerProps());
+      // The traversal plans its cut against a share of this budget, fixed at construction. A new
+      // scene has just built its traversal against the new budget already.
+      traversalNeedsRebuild = !sceneChanged;
+    }
+    if (traversalNeedsRebuild) {
+      this._createTraversal();
     }
 
     if (
@@ -601,17 +731,10 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
         props.depthWriteEnabled !== backend.depthWriteEnabled ||
         props.alphaMode !== backend.alphaMode
       ) {
-        backend.compositor.destroy();
-        backend.compositor = new GPUSplatGraphMixedRenderer(backend.renderer, {
-          depthCompare: props.depthCompare,
-          // Stochastic coverage blends opaquely and owns the depth buffer, so a caller's depth
-          // preference does not apply to it.
-          depthWriteEnabled:
-            props.alphaMode === 'stochastic' ? true : Boolean(props.depthWriteEnabled)
-        });
         backend.depthCompare = props.depthCompare as CompareFunction;
         backend.depthWriteEnabled = Boolean(props.depthWriteEnabled);
         backend.alphaMode = props.alphaMode as GPUSplatAlphaMode;
+        this._recreateCompositor(backend);
       }
 
       backend.renderer.setProps({
@@ -653,7 +776,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
    */
   compute(params: LayerComputeParameters): void {
     const {backend, placement} = this.state;
-    if (backend?.kind !== 'gpu-graph' || !placement) {
+    if (backend?.kind !== 'gpu-graph' || !placement || !this._claimViewport(params.viewport)) {
       return;
     }
 
@@ -672,28 +795,54 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     backend.compositor.predraw(params.commandEncoder);
   }
 
-  draw(opts: {renderPass: any; shaderModuleProps?: any}): void {
+  /**
+   * Draws the splats, or their picking colors in deck.gl's picking pass.
+   *
+   * Only the viewport the layer claimed this frame is drawn into; see the class comment. deck.gl's
+   * depth (`pickZ`) pass is skipped outright: it reads a float target this layer has no single
+   * meaningful depth to write into.
+   */
+  draw(opts: {
+    renderPass: RenderPass;
+    shaderModuleProps?: any;
+    parameters?: RenderPipelineParameters;
+  }): void {
     const {backend, placement} = this.state;
     if (!backend || !placement) {
       return;
     }
+    const picking = opts.shaderModuleProps?.picking;
+    const isPicking = Boolean(picking?.isActive);
+    if (isPicking && picking?.isAttribute) {
+      return;
+    }
 
     if (backend.kind === 'cpu-sort') {
-      this._updateCamera(backend, placement, this.context.viewport);
-      this._updateHierarchyView(this.context.viewport);
+      // Not pickable: the WebGL2 renderer has no picking output, and drawing display colors into
+      // deck's picking buffer would report whatever the colors happen to decode to. Nor may a pick
+      // advance the traversal or the ramps - it is an extra render of the same frame.
+      const {viewport} = this.context;
+      if (isPicking || !this._claimViewport(viewport)) {
+        return;
+      }
+      this._updateCamera(backend, placement, viewport);
+      this._updateHierarchyView(viewport);
       this._advanceFades();
       backend.renderer.draw(opts.renderPass);
       return;
     }
 
-    // `isAttribute` marks deck.gl's depth (pickZ) pass, which reads a float target this layer has
-    // no single meaningful depth to write into.
-    const picking = opts.shaderModuleProps?.picking;
-    if (picking?.isActive && !picking?.isAttribute) {
-      this._drawPicking(opts.renderPass);
+    // Picking passes run no compute, so the viewport claimed by the last draw pass is the one the
+    // renderer's projection was computed for.
+    if (this.context.viewport?.id !== this.state.primaryViewportId) {
+      return;
+    }
+    if (isPicking) {
+      this._drawPicking(opts.renderPass, opts.parameters ?? {});
       return;
     }
 
+    this._syncAttachmentFormats(backend, opts.renderPass);
     backend.compositor.draw(opts.renderPass);
   }
 
@@ -738,6 +887,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     return pickInfo;
   }
 
+  /** Releases the renderer, the traversal, the residency window and every page it owns. */
   finalizeState(): void {
     // Released without setState: the layer's internal state is torn down after this returns.
     this._destroyResources();
@@ -773,14 +923,29 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     };
   }
 
-  /** Draws the visible rows with deck.gl's picking colors into deck.gl's picking framebuffer. */
-  private _drawPicking(renderPass: any): void {
+  /**
+   * Draws the visible rows with deck.gl's picking colors into deck.gl's picking framebuffer.
+   *
+   * @param deckParameters What deck.gl's picking pass set for this layer - notably the blend state
+   * that writes the layer's own index into alpha. See `getSplatPickingParameters`.
+   */
+  private _drawPicking(renderPass: RenderPass, deckParameters: RenderPipelineParameters): void {
     const {backend} = this.state;
     if (backend?.kind !== 'gpu-graph' || !this.props.pickable) {
       return;
     }
-    const model = this._getPickingModel(backend);
-    if (!model || model.pipeline.isErrored || !backend.pickingSources) {
+    const parameters = getSplatPickingParameters(deckParameters);
+    const model = this._getPickingModel(backend, parameters);
+    if (!model || !backend.pickingSources) {
+      return;
+    }
+    // The pipeline is bound directly rather than through `Model.draw`, because the draw is the
+    // renderer's indirect command; so the model's own lazy pipeline update is triggered here.
+    model.setParameters(parameters);
+    if (model._pipelineNeedsUpdate) {
+      model.pipeline = model._updatePipeline();
+    }
+    if (model.pipeline.isErrored) {
       return;
     }
 
@@ -806,7 +971,10 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
   }
 
   /** Builds or reuses the picking model, rebuilding it when the graph reallocates its buffers. */
-  private _getPickingModel(backend: Extract<SplatBackend, {kind: 'gpu-graph'}>): Model | undefined {
+  private _getPickingModel(
+    backend: Extract<SplatBackend, {kind: 'gpu-graph'}>,
+    parameters: RenderPipelineParameters
+  ): Model | undefined {
     const {renderer} = backend;
     const uniformBuffer = renderer.uniformBuffer;
     const sortedIndexBuffer = renderer.sortedIndexBuffer;
@@ -882,9 +1050,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       instanceCount: renderer.capacity.splatCount,
       vertexCount: 4,
       topology: 'triangle-strip',
-      // Picking writes depth so the nearest Gaussian with real coverage wins, which the display
-      // pass deliberately does not do.
-      parameters: {depthWriteEnabled: true, depthCompare: 'less-equal', blend: false}
+      parameters
     });
     return backend.pickingModel;
   }
@@ -933,6 +1099,9 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     this.setState({
       hierarchySource: source,
       residency,
+      // Once per scene: a loader may own a worker pool or a connection, and a traversal rebuilt for
+      // a new error threshold or budget is the same scene.
+      pageLoader: source.createPageLoader(device),
       splatData: [],
       drawnSplatCount: 0,
       ancestorIds: new Map(),
@@ -959,15 +1128,32 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
 
   /** The ramp controller for the current fade props, or `undefined` when they are all off. */
   private _createFadeController(): SplatFadeController<GPUSplatData> | undefined {
-    const {fadeInDuration, fadeOutDuration, fadeHoldDuration} = this.props;
+    const {fadeInDuration, fadeOutDuration} = this.props;
     if (!fadeInDuration && !fadeOutDuration) {
       return undefined;
     }
-    return new SplatFadeController<GPUSplatData>({
+    return new SplatFadeController<GPUSplatData>(this._getFadeControllerProps());
+  }
+
+  /**
+   * Ramp timing from the fade props, plus the bound on what held pages may occupy.
+   *
+   * Held pages are pinned, so a large camera move that holds the whole previous frontier would
+   * otherwise occupy residency the new frontier needs for as long as `fadeHoldDuration` runs. The
+   * bound is the share of residency the selection budget leaves free for exactly this - see
+   * `LINGERING_SHARE_OF_RESIDENCY` - so the planned cut and the held pages together still fit.
+   */
+  private _getFadeControllerProps(): SplatFadeControllerProps {
+    const {fadeInDuration, fadeOutDuration, fadeHoldDuration} = this.props;
+    const capacity = this._resolveResidentSplatCapacity();
+    return {
       fadeInDuration: fadeInDuration!,
       fadeOutDuration: fadeOutDuration!,
-      holdDuration: fadeHoldDuration!
-    });
+      holdDuration: fadeHoldDuration!,
+      ...(capacity === undefined
+        ? {}
+        : {maxHeldSplats: Math.floor(capacity * LINGERING_SHARE_OF_RESIDENCY)})
+    };
   }
 
   /**
@@ -985,7 +1171,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     // it is what a caller scrubs to animate through time - and a page ramping up is a property of
     // the renderer catching up with the camera, not of the moment being displayed.
     const now = performance.now();
-    const elapsed = this.state.lastFadeTime > 0 ? Math.max(0, now - this.state.lastFadeTime) : 16;
+    const elapsed = Math.max(0, now - this.state.lastFadeTime);
     this.state.lastFadeTime = now;
 
     const before = fade.drawList;
@@ -1057,13 +1243,105 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     }
   }
 
+  /**
+   * Releases every pin the layer took for a ramp.
+   *
+   * For when the ramps go away with pages still lingering - fades turned off mid-scene - so that
+   * nothing is left pinned that no one will ever unpin.
+   */
+  private _releaseLingeringPins(): void {
+    const {residency, pinnedLingering} = this.state;
+    for (const batch of pinnedLingering) {
+      if (residency && !batch.destroyed) {
+        residency.pin(batch, false);
+      }
+    }
+    pinnedLingering.clear();
+  }
+
+  /**
+   * Splats the traversal may select, planned against rather than discovered by rejection.
+   *
+   * Without a plan the traversal selects every node over the error target and lets residency refuse
+   * what does not fit; the refused nodes are asked for again every frame, which on a scene the
+   * budget cannot finish refining is thousands of rejected requests a second. Planning the cut
+   * against a budget means the traversal only asks for what will be admitted.
+   *
+   * The selected cut is not all that is resident; see {@link SELECTION_SHARE_OF_RESIDENCY}.
+   */
+  private _resolveSelectionBudget(): number | undefined {
+    const capacity = this._resolveResidentSplatCapacity();
+    return capacity === undefined ? undefined : Math.floor(capacity * SELECTION_SHARE_OF_RESIDENCY);
+  }
+
+  /**
+   * Splats the residency window can actually hold, or `undefined` when it is unbounded.
+   *
+   * The window is full at whichever of its ceilings binds first, so a byte ceiling counts as the
+   * splats it holds at what this scene's pages really cost. Pricing it at the preset's nominal 120
+   * bytes a splat would be wrong in both directions: a degree-3 page costs nearly twice that, so
+   * the plan would ask for pages the byte ceiling then refuses - the storm the plan exists to
+   * prevent - and a degree-0 page costs well under half, so the plan would leave most of the
+   * window unused.
+   */
+  private _resolveResidentSplatCapacity(): number | undefined {
+    const {maxResidentSplats, maxGpuBytes} = this._resolveResidencyBudget();
+    const capacity = Math.min(
+      maxResidentSplats ?? Number.POSITIVE_INFINITY,
+      maxGpuBytes === undefined
+        ? Number.POSITIVE_INFINITY
+        : getSplatCountForGpuBytes(maxGpuBytes, this.state.plannedBytesPerSplat)
+    );
+    return Number.isFinite(capacity) ? capacity : undefined;
+  }
+
+  /**
+   * What a resident splat of this scene costs, in the bytes the residency window counts.
+   *
+   * Measured from the pages already resident once there are any, because only the pages know their
+   * harmonic degree and color encoding. Before that, the source's own per-node estimates are used
+   * if it gives them, and otherwise the preset pricing - which is higher than any page below degree
+   * 2 costs, so an unmeasured plan errs toward asking for too little rather than too much.
+   */
+  private _measureBytesPerSplat(): number {
+    const {residency, hierarchySource} = this.state;
+    const stats = residency?.getStats();
+    if (stats && stats.residentSplatCount > 0) {
+      return stats.residentGpuByteLength / stats.residentSplatCount;
+    }
+    let estimatedBytes = 0;
+    let estimatedSplats = 0;
+    for (const root of hierarchySource?.roots ?? []) {
+      if (root.estimatedGpuBytes && root.estimatedSplatCount) {
+        estimatedBytes += root.estimatedGpuBytes;
+        estimatedSplats += root.estimatedSplatCount;
+      }
+    }
+    return estimatedSplats > 0 ? estimatedBytes / estimatedSplats : RESIDENT_BYTES_PER_SPLAT;
+  }
+
+  /**
+   * Re-plans the traversal once measured page cost has drifted from what it was planned with.
+   *
+   * The traversal takes its budget at construction, so this rebuilds it - over the layer's own
+   * residency window, so nothing resident is lost. The hysteresis means a scene settles after its
+   * first pages arrive rather than re-planning as every page shifts the average slightly.
+   */
+  private _replanIfPageCostDrifted(): void {
+    const {plannedBytesPerSplat} = this.state;
+    const measured = this._measureBytesPerSplat();
+    if (Math.abs(measured - plannedBytesPerSplat) > plannedBytesPerSplat * PAGE_COST_REPLAN_DRIFT) {
+      this._createTraversal();
+    }
+  }
+
   /** The residency ceiling, from the device preset with any caller overrides applied. */
   private _resolveResidencyBudget(): SplatResidencyBudget {
     const {deviceClass, residencyBudget} = this.props;
     const preset = deviceClass
       ? SPLAT_DEVICE_BUDGETS[deviceClass]
       : getSplatDeviceBudget(this.context.device);
-    return {...preset, ...(residencyBudget ?? undefined)};
+    return applySplatBudgetOverrides(preset, residencyBudget);
   }
 
   /**
@@ -1080,11 +1358,16 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     }
 
     this.state.hierarchy?.destroy();
+    this.state.plannedBytesPerSplat = this._measureBytesPerSplat();
+    // The bound on held pages is a share of the same capacity, so it moves with the plan.
+    this.state.fade?.setProps(this._getFadeControllerProps());
     const hierarchy = new SplatHierarchyManager({
       roots: hierarchySource.roots,
       residencyManager: residency,
-      loadPage: hierarchySource.createPageLoader(this.context.device),
+      loadPage: this.state.pageLoader,
       maximumScreenSpaceError: this.props.maximumScreenSpaceError,
+      distanceFalloff: this.props.distanceFalloff,
+      splatBudget: this._resolveSelectionBudget(),
       maxConcurrentLoads: this.props.maxConcurrentLoads,
       onFrontierChange: (batches, frontier) => this._onFrontierChange(batches, frontier),
       onLoadError: error => {
@@ -1128,7 +1411,10 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
 
     if (fade) {
       const now = performance.now();
-      if (this.state.lastFadeTime === 0) {
+      // Ramps only advance while something is animating, so after an idle spell the clock is as old
+      // as the last ramp. Measuring the first step of a new one from there would jump it straight to
+      // full opacity - the pop the ramp exists to remove - so an idle clock restarts here.
+      if (!fade.animating) {
         this.state.lastFadeTime = now;
       }
       fade.sync(this._toFadeEntries(frontier), now);
@@ -1189,8 +1475,12 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
    * scene's own coordinates, and `_updateCamera` has already produced the camera position in those
    * same coordinates through the inverse model matrix. Screen-space error is a ratio of the two
    * times a focal length in pixels, so it comes out in real pixels as long as both sides agree.
+   *
+   * The viewport's target, taken into scene units the same way, is the focus the distance falloff
+   * is measured from, and the camera's travel relative to it is what motion coarsening measures.
    */
   private _updateHierarchyView(viewport: Viewport): void {
+    this._replanIfPageCostDrifted();
     const {hierarchy, camera} = this.state;
     if (!hierarchy) {
       return;
@@ -1206,12 +1496,44 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
         ? undefined
         : (viewportWithFieldOfView.fovy * Math.PI) / 180);
 
+    const focusPosition = camera.inverseModelMatrix.transformAsPoint(
+      viewport.center as number[],
+      [0, 0, 0]
+    ) as [number, number, number];
+    const focusDistance = Math.hypot(
+      focusPosition[0] - camera.cameraPosition[0],
+      focusPosition[1] - camera.cameraPosition[1],
+      focusPosition[2] - camera.cameraPosition[2]
+    );
+    const {motionDetail} = this.state;
+    const requestErrorScale = motionDetail.update(
+      {
+        cameraPosition: camera.cameraPosition,
+        focusPosition,
+        verticalFieldOfView: verticalFieldOfView ?? DEFAULT_VERTICAL_FIELD_OF_VIEW,
+        time: performance.now()
+      },
+      this.props.motionErrorScale ?? 1
+    );
+    const {foveation} = this.props;
+
     hierarchy.update({
-      cameraPosition: camera.cameraPosition,
+      // Copied: the traversal keeps the view to re-run it when a page lands, and the cache is
+      // overwritten in place every frame.
+      cameraPosition: [...camera.cameraPosition],
       viewportSize: [Math.max(1, viewport.width * ratio), Math.max(1, viewport.height * ratio)],
       modelViewProjectionMatrix: Array.from(camera.modelViewProjectionMatrix),
+      requestErrorScale,
+      ...(focusDistance > 0 ? {focusDistance} : {}),
+      ...(foveation ? {foveation} : {}),
       ...(verticalFieldOfView === undefined ? {} : {verticalFieldOfView})
     });
+
+    // A still camera draws no frames, and the coarsening only relaxes on a frame. Keep drawing until
+    // it has, or the view stays coarse after the camera stops.
+    if (motionDetail.isSettling) {
+      this.setNeedsRedraw();
+    }
   }
 
   /**
@@ -1242,20 +1564,104 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
         pickingAlphaThreshold: this.props.pickingAlphaThreshold,
         ...(this.props.clipRegion ? {clipRegion: this.props.clipRegion} : {})
       });
-      return {
+      const backend: Extract<SplatBackend, {kind: 'gpu-graph'}> = {
         kind: 'gpu-graph',
         renderer,
-        compositor: new GPUSplatGraphMixedRenderer(renderer, {
-          depthCompare,
-          depthWriteEnabled: alphaMode === 'stochastic' ? true : Boolean(depthWriteEnabled)
-        }),
+        compositor: undefined!,
         depthCompare: depthCompare as CompareFunction,
         depthWriteEnabled: Boolean(depthWriteEnabled),
         alphaMode: alphaMode as GPUSplatAlphaMode
       };
+      this._recreateCompositor(backend);
+      return backend;
     }
 
     return {kind: 'cpu-sort', renderer: new SplatRenderer(device, {data: splatData})};
+  }
+
+  /**
+   * Replaces the display compositor, whose depth and blend state and attachment formats are all
+   * baked into its pipeline.
+   */
+  private _recreateCompositor(backend: Extract<SplatBackend, {kind: 'gpu-graph'}>): void {
+    backend.compositor?.destroy();
+    backend.compositor = new GPUSplatGraphMixedRenderer(backend.renderer, {
+      depthCompare: backend.depthCompare,
+      // Stochastic coverage blends opaquely and owns the depth buffer, so a caller's depth
+      // preference does not apply to it.
+      depthWriteEnabled: backend.alphaMode === 'stochastic' ? true : backend.depthWriteEnabled,
+      ...(backend.colorAttachmentFormat
+        ? {colorAttachmentFormat: backend.colorAttachmentFormat}
+        : {}),
+      ...(backend.depthStencilAttachmentFormat
+        ? {depthStencilAttachmentFormat: backend.depthStencilAttachmentFormat}
+        : {})
+    });
+  }
+
+  /**
+   * Rebuilds the compositor when deck.gl draws the layer into a framebuffer whose formats differ
+   * from the ones its pipeline was built for.
+   *
+   * The compositor otherwise assumes the device's preferred canvas formats, which is only what deck
+   * renders into when it renders straight to the canvas. Post-processing effects and offscreen
+   * targets render into framebuffers of their own, and a pipeline built for the wrong formats fails
+   * validation there. The first frame in a new target pays one pipeline rebuild; after that the
+   * formats match and this is two string comparisons.
+   */
+  private _syncAttachmentFormats(
+    backend: Extract<SplatBackend, {kind: 'gpu-graph'}>,
+    renderPass: RenderPass
+  ): void {
+    const framebuffer = renderPass.props.framebuffer;
+    if (!framebuffer) {
+      return;
+    }
+    const colorFormat = framebuffer.colorAttachments[0]?.texture?.format as
+      | TextureFormatColor
+      | undefined;
+    const depthFormat = framebuffer.depthStencilAttachment?.texture?.format as
+      | TextureFormatDepthStencil
+      | undefined;
+    const {props} = backend.compositor;
+    if (
+      (colorFormat === undefined || colorFormat === props.colorAttachmentFormat) &&
+      (depthFormat === undefined || depthFormat === props.depthStencilAttachmentFormat)
+    ) {
+      return;
+    }
+    backend.colorAttachmentFormat = colorFormat ?? props.colorAttachmentFormat;
+    backend.depthStencilAttachmentFormat = depthFormat ?? props.depthStencilAttachmentFormat;
+    this._recreateCompositor(backend);
+  }
+
+  /**
+   * Decides whether the layer renders into this viewport, and claims it if nothing else has.
+   *
+   * The layer has one renderer, one traversal and one set of camera uniforms, so it serves one
+   * viewport: the first it is asked to render in. Called once per viewport per frame from the stage
+   * that advances the frame - `compute` on WebGPU, `draw` on WebGL2. A primary viewport that stops
+   * being rendered is noticed when another viewport comes round twice without it, and that one
+   * takes over.
+   */
+  private _claimViewport(viewport: Viewport): boolean {
+    const {viewportsSincePrimary} = this.state;
+    if (this.state.primaryViewportId === undefined) {
+      this.state.primaryViewportId = viewport.id;
+    }
+    if (viewport.id === this.state.primaryViewportId) {
+      viewportsSincePrimary.clear();
+      return true;
+    }
+    if (viewportsSincePrimary.has(viewport.id)) {
+      this.state.primaryViewportId = viewport.id;
+      viewportsSincePrimary.clear();
+      // A different camera: what the motion tracker last saw is not this view's previous frame.
+      this.state.motionDetail.reset();
+      return true;
+    }
+    viewportsSincePrimary.add(viewport.id);
+    return false;
   }
 
   /**
@@ -1285,7 +1691,15 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
     }
     if (splatHierarchy) {
       // Without percentiles a streamed scene cannot be normalized, and guessing from whatever
-      // happens to be resident would move the whole scene every time a page loads.
+      // happens to be resident would move the whole scene every time a page loads. Nothing is
+      // drawn, which is easy to mistake for a loading problem, so say why - once.
+      if (!this.state.warnedMissingPlacement) {
+        this.state.warnedMissingPlacement = true;
+        log.warn(
+          `${this.id}: a streaming splatHierarchy needs scenePercentiles or georeferenced: true ` +
+            'to be placed; nothing will be drawn'
+        )();
+      }
       return undefined;
     }
 
@@ -1418,6 +1832,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
   }
 
   private _invalidateCameraCache(): void {
+    this.state.motionDetail.reset();
     const cache = this.state.camera;
     cache.placement = undefined;
     cache.submittedMatrix = undefined;
@@ -1438,7 +1853,12 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       ancestorIds: new Map(),
       pinnedLingering: new Set(),
       frontierBatches: new Set(),
+      pageLoader: undefined,
+      plannedBytesPerSplat: RESIDENT_BYTES_PER_SPLAT,
       lastFadeTime: 0,
+      primaryViewportId: undefined,
+      viewportsSincePrimary: new Set(),
+      warnedMissingPlacement: false,
       drawnSplatCount: 0
     });
   }
@@ -1455,9 +1875,9 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
   private _destroyResources(): void {
     const {backend, hierarchy, residency} = this.state;
     this.state.unsubscribeRoots?.();
-    // Before the pages go: a ramp mid-flight has scaled opacities in a column the caller may still
-    // own on the resident path, and restoring them is cheaper than reasoning about who does.
-    this.state.fade?.reset();
+    // Not `fade.reset()`: ramps only ever run over streamed pages, which the residency window owns
+    // and is about to destroy, so restoring their opacities would be GPU writes into buffers that
+    // are freed a moment later.
     if (backend?.kind === 'gpu-graph') {
       backend.pickingModel?.destroy();
       backend.compositor.destroy();
@@ -1580,6 +2000,35 @@ function areBudgetsEqual(
     first?.maxResidentChunks === second?.maxResidentChunks
   );
 }
+
+/**
+ * Share of the residency capacity pages lingering after they left the frontier may occupy.
+ *
+ * An eighth, the same headroom the standalone terrain runtime this layer is measured against
+ * reserves for its fades. Enforced, not just assumed: held pages past it give up their hold early
+ * (see `SplatFadeControllerProps.maxHeldSplats`), because after a large camera move the whole
+ * previous frontier can be held at once, and pinned pages the new frontier cannot evict would
+ * starve it for as long as the hold runs.
+ */
+const LINGERING_SHARE_OF_RESIDENCY = 1 / 8;
+
+/**
+ * Share of the residency capacity the traversal's planned cut may spend.
+ *
+ * What is resident is more than what is drawn. With `'replace'` refinement every refined node stays
+ * pinned as the fallback its children are drawn over until they land, and a full quadtree's interior
+ * is a third of its leaves - so a cut of `B` splats holds up to `4B / 3`. What is left after the
+ * lingering share is therefore `4B / 3`, so `B` is three quarters of it: `3/4 * 7/8`.
+ */
+const SELECTION_SHARE_OF_RESIDENCY = (3 / 4) * (1 - LINGERING_SHARE_OF_RESIDENCY);
+
+/**
+ * Relative change in measured bytes per splat that re-plans the traversal.
+ *
+ * Large enough that the average settling as pages of one scene arrive never re-plans, small enough
+ * that a plan priced for the wrong harmonic degree always does.
+ */
+const PAGE_COST_REPLAN_DRIFT = 0.25;
 
 /** Chooses a finite reservation from a budget that may be unbounded. */
 function resolveReservation(total: number, budgeted: number | undefined): number {

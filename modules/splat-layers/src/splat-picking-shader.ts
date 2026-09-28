@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import type {ShaderLayout} from '@luma.gl/core';
+import type {RenderPipelineParameters, ShaderLayout} from '@luma.gl/core';
 import {
   GPU_SPLAT_FRAGMENT_SHARED_SHADER_WGSL,
   GPU_SPLAT_GRAPH_SHARED_WGSL,
@@ -14,8 +14,8 @@ import {
  *
  * luma.gl ships a Gaussian splat picker of its own, but it renders into integer attachments it
  * owns and resolves the hit itself. Inside deck.gl that is the wrong shape: deck already has a
- * picking framebuffer, a readback path, hover and click dispatch, `autoHighlight`, tooltips and
- * multi-layer depth picking. What the splat layer needs is not another picker but to participate
+ * picking framebuffer, a readback path, hover and click dispatch, `autoHighlight` and tooltips.
+ * What the splat layer needs is not another picker but to participate
  * in the one that exists - which means encoding the picked row into deck's RGB picking color and
  * letting everything downstream work unchanged.
  *
@@ -25,6 +25,8 @@ import {
  * nothing to the pixel, so a fragment only claims the pixel once its own coverage passes a
  * threshold. Second, depth: the picking pass writes and tests depth, which the display pass
  * deliberately does not, so the nearest splat that passes the coverage test wins.
+ *
+ * Internal to the layer: none of this is exported from the package.
  */
 
 /** Index `picking_getPickingColorFromIndex` treats as "no object". */
@@ -50,26 +52,23 @@ export const SPLAT_COMPATIBLE_PICKING_SHADER_LAYOUT = {
   bindings: [{name: 'graphUniforms', type: 'uniform', group: 0, location: 0}]
 } satisfies ShaderLayout;
 
-const SPLAT_PICKING_SHARED = /* wgsl */ `\
-${GPU_SPLAT_GRAPH_SHARED_WGSL}
-${GPU_SPLAT_QUAD_EXPANSION_SHADER_WGSL}
-${GPU_SPLAT_FRAGMENT_SHARED_SHADER_WGSL}
-
+/**
+ * Encodes a projected row index into deck.gl's RGB picking color.
+ *
+ * Kept as its own source string so tests can execute exactly the WGSL the picking pipeline
+ * compiles, rather than a JavaScript restatement of it.
+ */
+export const SPLAT_PICKING_COLOR_WGSL = /* wgsl */ `\
 const PICKING_INVALID_INDEX: u32 = ${PICKING_INVALID_INDEX}u;
-
-struct SplatPickingFragmentInputs {
-  @builtin(position) position: vec4<f32>,
-  @location(0) gaussianCoordinate: vec2<f32>,
-  @location(1) pixelHalfWidth: vec2<f32>,
-  @location(2) alpha: f32,
-  @location(3) @interpolate(flat) rowIndex: u32,
-};
 
 /**
  * Encodes a row index exactly as deck.gl's CPU-side \`encodePickingColor\` does.
  *
  * Index zero is reserved for "nothing picked", so every real row is stored one higher; a row past
  * the 24 bits the encoding carries reports nothing rather than aliasing onto another row.
+ *
+ * Alpha is written as 1 and never reaches the framebuffer as such: deck.gl's picking blend state
+ * replaces it with the layer's own encoded index through the blend constant.
  */
 fn getSplatPickingColor(rowIndex: u32) -> vec4<f32> {
   if (rowIndex >= PICKING_INVALID_INDEX) {
@@ -83,6 +82,21 @@ fn getSplatPickingColor(rowIndex: u32) -> vec4<f32> {
     1.0
   );
 }
+`;
+
+const SPLAT_PICKING_SHARED = /* wgsl */ `\
+${GPU_SPLAT_GRAPH_SHARED_WGSL}
+${GPU_SPLAT_QUAD_EXPANSION_SHADER_WGSL}
+${GPU_SPLAT_FRAGMENT_SHARED_SHADER_WGSL}
+
+${SPLAT_PICKING_COLOR_WGSL}
+struct SplatPickingFragmentInputs {
+  @builtin(position) position: vec4<f32>,
+  @location(0) gaussianCoordinate: vec2<f32>,
+  @location(1) pixelHalfWidth: vec2<f32>,
+  @location(2) alpha: f32,
+  @location(3) @interpolate(flat) rowIndex: u32,
+};
 
 fn resolveSplatPickingColor(
   uniforms: GraphSplatUniforms,
@@ -178,3 +192,26 @@ fn fragmentMain(input: SplatPickingFragmentInputs) -> @location(0) vec4<f32> {
   return resolveSplatPickingColor(graphUniforms, input);
 }
 `;
+
+/**
+ * Pipeline parameters for the picking draw, derived from the ones deck.gl hands the layer.
+ *
+ * deck.gl tells pickable layers apart by alpha: its picking pass sets a blend state whose alpha
+ * source factor is the blend constant, and sets that constant to the layer's encoded index. A
+ * pipeline with blending off writes the shader's alpha of 1 straight through, which decodes as the
+ * first pickable layer - or as nothing at all - so the pick never resolves to this one. So the
+ * picking model takes deck's color and blend state as given and overrides only depth: the picking
+ * pass writes and tests depth, so the nearest Gaussian with real coverage wins.
+ *
+ * The blend constant itself is dynamic render-pass state on WebGPU, which deck.gl has already set
+ * on the pass by the time `draw` runs, so it is dropped here rather than baked into a pipeline.
+ */
+export function getSplatPickingParameters(
+  deckParameters: RenderPipelineParameters & {
+    blendConstant?: unknown;
+    blendColor?: unknown;
+  }
+): RenderPipelineParameters {
+  const {blendConstant, blendColor, ...pipelineParameters} = deckParameters;
+  return {...pipelineParameters, depthWriteEnabled: true, depthCompare: 'less-equal'};
+}

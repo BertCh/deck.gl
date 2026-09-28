@@ -8,6 +8,7 @@ import type {Layer, UpdateParameters} from '@deck.gl/core';
 import {SplatClipExtension} from '@deck.gl/splat-layers';
 import type {SplatClipExtensionProps} from '@deck.gl/splat-layers';
 import {getSplatClipCoverage, packSplatClipUniforms} from '@luma.gl/splats';
+import type {SplatClipRegion} from '@luma.gl/splats';
 
 /**
  * Drives the extension directly rather than through a layer stack.
@@ -63,8 +64,8 @@ function getDefaultProps(): SplatClipExtensionProps {
 }
 
 /** The region the layer would hand to its renderer. */
-function getRegion(result: {state: Record<string, unknown>}) {
-  return SplatClipExtension.getClipRegion({state: result.state} as unknown as Layer);
+function getRegion(result: {state: Record<string, unknown>}): SplatClipRegion | undefined {
+  return result.state.clipRegion as SplatClipRegion | undefined;
 }
 
 test('SplatClipExtension#a region is only built when planes are supplied', () => {

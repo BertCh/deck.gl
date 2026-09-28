@@ -11,6 +11,7 @@ const LUMA_ALIASES_LOCAL = {
   '@luma.gl/engine': `${lumaModules}/engine/src`,
   '@luma.gl/webgl': `${lumaModules}/webgl/src`,
   '@luma.gl/shadertools': `${lumaModules}/shadertools/src`,
+  '@luma.gl/splats': `${lumaModules}/splats/src`,
   '@luma.gl/test-utils': `${lumaModules}/test-utils/src`,
   '@luma.gl/experimental': `${lumaModules}/experimental/src`
 };
@@ -35,6 +36,8 @@ const config = {
       '@deck.gl/*': 'globalThis.deck',
       '@luma.gl/core': 'globalThis.luma',
       '@luma.gl/engine': 'globalThis.luma',
+      // A peer dependency of @deck.gl/splat-layers; luma.gl's own bundle adds it to `luma`.
+      '@luma.gl/splats': 'globalThis.luma',
       '@loaders.gl/core': 'globalThis.loaders',
       'h3-js': 'globalThis.h3 || {}'
     }

@@ -6,36 +6,6 @@ import {LayerExtension} from '@deck.gl/core';
 import type {Layer, UpdateParameters} from '@deck.gl/core';
 import type {SplatClipCombineMode, SplatClipPlane, SplatClipRegion} from '@luma.gl/splats';
 
-/**
- * Clips Gaussian splats to a half-space, slab, corridor or convex prism, without editing the data.
- *
- * Masking to a parcel, a right of way or a slice plane is routine GIS work, and on a splat scene it
- * is routinely unavailable: Esri documents Slice as unsupported for splat layers and CesiumJS has
- * no clipping-plane path for them at all.
- *
- * The reason it is not simply a clip test is that a Gaussian is a volume, not a point. Testing only
- * its center cuts the scene along a visibly ragged boundary - a large splat straddling the plane
- * either disappears whole or stays whole - which is exactly what makes a center-based clip look
- * wrong on splats and fine on triangles. Measuring the signed distance in units of each splat's own
- * extent along the plane normal instead, and attenuating opacity by the resulting partial coverage,
- * gives a boundary that follows the geometry for one extra term per plane.
- *
- * Nothing is removed from the source data and no buffer is rewritten: the region is evaluated in
- * the projection compute pass the renderer already runs, so it can animate freely.
- *
- * @example Keep only what is above a horizontal plane, fading over each splat's own extent.
- * ```ts
- * new SplatLayer({
- *   // ...
- *   extensions: [new SplatClipExtension()],
- *   clipPlanes: [{normal: [0, 0, 1], distance: -10}]
- * })
- * ```
- *
- * @remarks WebGPU only. The WebGL2 fallback has no projection compute pass to evaluate the region
- * in, and doing it per row in JavaScript would cost more than the layer's whole frame budget.
- */
-
 /** Props {@link SplatClipExtension} adds to a layer. */
 export type SplatClipExtensionProps = {
   /**
@@ -76,6 +46,38 @@ type SplatClipExtensionState = {
   clipRegion?: SplatClipRegion;
 };
 
+/**
+ * Clips Gaussian splats to a half-space, slab, corridor or convex prism, without editing the data.
+ *
+ * Masking to a parcel, a right of way or a slice plane is routine GIS work, and on a splat scene it
+ * is routinely unavailable: Esri documents Slice as unsupported for splat layers and CesiumJS has
+ * no clipping-plane path for them at all.
+ *
+ * The reason it is not simply a clip test is that a Gaussian is a volume, not a point. Testing only
+ * its center cuts the scene along a visibly ragged boundary - a large splat straddling the plane
+ * either disappears whole or stays whole - which is exactly what makes a center-based clip look
+ * wrong on splats and fine on triangles. Measuring the signed distance in units of each splat's own
+ * extent along the plane normal instead, and attenuating opacity by the resulting partial coverage,
+ * gives a boundary that follows the geometry for one extra term per plane.
+ *
+ * Nothing is removed from the source data and no buffer is rewritten: the region is evaluated in
+ * the projection compute pass the renderer already runs, so it can animate freely.
+ *
+ * @example Keep only what is above a horizontal plane, fading over each splat's own extent.
+ * ```ts
+ * new SplatLayer({
+ *   // ...
+ *   extensions: [new SplatClipExtension()],
+ *   clipPlanes: [{normal: [0, 0, 1], distance: -10}]
+ * })
+ * ```
+ *
+ * Removing the extension from a layer removes its region too; the layer's own `clipRegion` prop,
+ * if any, applies again.
+ *
+ * @remarks WebGPU only. The WebGL2 fallback has no projection compute pass to evaluate the region
+ * in, and doing it per row in JavaScript would cost more than the layer's whole frame budget.
+ */
 export default class SplatClipExtension extends LayerExtension {
   static defaultProps = defaultProps;
   static extensionName = 'SplatClipExtension';
@@ -88,16 +90,17 @@ export default class SplatClipExtension extends LayerExtension {
    */
   updateState(
     this: Layer<SplatClipExtensionProps>,
-    {props, oldProps}: UpdateParameters<Layer<SplatClipExtensionProps>>,
+    {props, oldProps, changeFlags}: UpdateParameters<Layer<SplatClipExtensionProps>>,
     extension: SplatClipExtension
   ) {
     void extension;
     const changed =
+      changeFlags.extensionsChanged ||
       props.clipPlanes !== oldProps.clipPlanes ||
       props.clipCombine !== oldProps.clipCombine ||
       props.clipSoftness !== oldProps.clipSoftness ||
       props.clipInverted !== oldProps.clipInverted;
-    if (!changed && (this.state as SplatClipExtensionState).clipRegion !== undefined) {
+    if (!changed) {
       return;
     }
 
@@ -112,16 +115,5 @@ export default class SplatClipExtension extends LayerExtension {
           }
         : undefined
     });
-  }
-
-  /**
-   * Resolves the region a layer should clip with.
-   *
-   * Exposed so a layer can consult the extension rather than the extension reaching into the
-   * layer's renderer: the layer already forwards its own `clipRegion` prop, and this simply wins
-   * over it when the extension is attached.
-   */
-  static getClipRegion(layer: Layer): SplatClipRegion | undefined {
-    return (layer.state as SplatClipExtensionState | undefined)?.clipRegion;
   }
 }

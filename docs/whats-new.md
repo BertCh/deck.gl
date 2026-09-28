@@ -15,8 +15,8 @@ Looking ahead, deck.gl v10 is expected to introduce larger architectural changes
 A new module, [`@deck.gl/splat-layers`](./api-reference/splat-layers/overview.md), renders 3D
 Gaussian splat scenes as deck.gl layers, composited into the same render pass as the rest of the
 layer stack rather than into an overlaid canvas. Opaque geometry drawn by earlier layers occludes
-splats behind it, because they share a depth buffer, and the splats participate in deck.gl's
-picking, hover and tooltip machinery.
+splats behind it, because they share a depth buffer, and on WebGPU the splats participate in
+deck.gl's picking, hover and tooltip machinery. A layer renders into one view at a time.
 
 On WebGPU the projection, culling, global depth sort, spherical-harmonic radiance and indirect draw
 all run as GPU compute over the source buffers. [`SplatClipExtension`](./api-reference/splat-layers/splat-clip-extension.md)
@@ -38,7 +38,9 @@ the camera asks for them and tell the layer through `subscribe`. The traversal r
 and every page already resident survives it.
 
 The module is not bundled into the `deck.gl` umbrella package: splat rendering is WebGPU-first and
-carries `@luma.gl/splats` as a dependency, so it is installed deliberately.
+carries `@luma.gl/splats` as a dependency, so it is installed deliberately. It calls `@luma.gl/splats`
+APIs that are not yet in a published luma.gl release, and currently builds against the luma.gl
+`deck-splat-layers` branch.
 
 ### A compute stage in the layer lifecycle
 
@@ -47,7 +49,9 @@ Layers can now record GPU compute work before the render pass opens, through a
 It runs on deck.gl's own command encoder, immediately before the render pass that consumes the
 result, so a layer that computes what it draws no longer has to open an encoder of its own and
 submit it separately. The stage runs once per viewport, interleaved with the render passes, so a
-multi-view frame gets one result per camera rather than the last camera's for all of them.
+multi-view frame gets one result per camera rather than the last camera's for all of them. Only
+layers that are about to be drawn are computed, and compute runs before draw passes only, not
+before picking.
 
 This is not splat-specific: any GPU-driven layer — an aggregation that bins on the GPU, a culling
 pass, a sort — wants the same thing. `LayerExtension` gained a matching `compute` hook.
@@ -115,6 +119,7 @@ New experimental multi-canvas foundations allow integrations to associate each `
 - The new `zoomAround` option chooses whether pointer-based zoom interactions keep the pointer location or the viewport center fixed.
 - The new `maxBoundsPadding` option fits `maxBounds` within a padded or asymmetrically positioned viewport region, with support for pixels, percentages, and CSS-style layout expressions.
 - `OrthographicController` and `MapController` now support `rubberBand`, allowing pan and zoom interactions to temporarily overshoot their constraints before easing back on release.
+- [`TerrainController`](./api-reference/core/terrain-controller.md) now follows the terrain on every rendered frame, filtered on elapsed time and capped at a fixed on-screen speed, instead of only during gestures. As a result it calls `onViewStateChange` from the frame loop while the camera baseline (`position[2]`) glides to a new elevation, with an empty `interactionState` and `transitionDuration: 0`. Controlled apps should apply these updates like any other view state change. A `position[2]` the app writes itself is taken over and eased back to the terrain rather than snapped away on the next gesture.
 
 ### @deck.gl/maplibre
 

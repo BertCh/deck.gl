@@ -20,19 +20,32 @@ import type {SplatResidencyBudget} from '@luma.gl/splats';
 
 /** A device class a budget can be chosen for. */
 export type SplatDeviceClass =
-  /** Desktop or laptop with a discrete or high-end integrated GPU. */
+  /** Desktop or laptop with a discrete GPU, or a GPU that does not report its kind. */
   | 'desktop'
-  /** Desktop or laptop with a low-end integrated GPU. */
+  /** Desktop or laptop with an integrated GPU other than Apple's. */
   | 'integrated'
-  /** iOS or iPadOS. */
+  /**
+   * Apple GPUs - Apple silicon Macs, iPhones and iPads - which share memory between CPU and GPU
+   * but have the bandwidth for it.
+   */
   | 'mobile-high'
-  /** Android and other mobile devices, where memory headroom is least predictable. */
+  /**
+   * Android and other mobile GPUs, where memory headroom is least predictable. Also every WebGL2
+   * device and every software rasterizer.
+   */
   | 'mobile'
   /** Standalone headsets, which render every frame twice. */
   | 'headset';
 
-/** Bytes a resident splat costs, across source columns, projection scratch and one SH band. */
-const RESIDENT_BYTES_PER_SPLAT = 120;
+/**
+ * Bytes a resident splat is priced at when a preset's byte ceiling is derived from its splat count:
+ * source columns, projection scratch and one spherical-harmonic band.
+ *
+ * This prices the *budget*, not any particular scene. A degree-3 scene costs nearly twice this per
+ * splat, which is why `SplatLayer` plans its selection from the bytes its pages actually cost
+ * rather than from this constant.
+ */
+export const RESIDENT_BYTES_PER_SPLAT = 120;
 
 /** Splat budgets by device class. */
 const SPLAT_BUDGET_BY_DEVICE_CLASS: Record<SplatDeviceClass, number> = {
@@ -43,26 +56,41 @@ const SPLAT_BUDGET_BY_DEVICE_CLASS: Record<SplatDeviceClass, number> = {
   headset: 500_000
 };
 
-/** Ready-made residency budgets, keyed by device class. */
+/**
+ * Ready-made residency budgets, keyed by device class. Each preset's `maxGpuBytes` is its
+ * `maxResidentSplats` priced at 120 bytes a splat.
+ */
 export const SPLAT_DEVICE_BUDGETS: Record<SplatDeviceClass, SplatResidencyBudget> = Object.freeze(
   Object.fromEntries(
     Object.entries(SPLAT_BUDGET_BY_DEVICE_CLASS).map(([deviceClass, maxResidentSplats]) => [
       deviceClass,
       Object.freeze({
         maxResidentSplats,
-        maxGpuBytes: maxResidentSplats * RESIDENT_BYTES_PER_SPLAT
+        maxGpuBytes: getSplatGpuBytes(maxResidentSplats)
       })
     ])
   )
 ) as Record<SplatDeviceClass, SplatResidencyBudget>;
 
 /**
+ * Mobile GPU families, matched against the vendor, driver and architecture strings a device reports.
+ *
+ * WebGPU adapters report short lowercase names - `qualcomm` / `adreno-7xx`, `arm` / `valhall` - and
+ * WebGL renderer strings the marketing names, so both spellings are listed.
+ */
+const MOBILE_GPU_PATTERN =
+  /adreno|qualcomm|mali|\barm\b|valhall|bifrost|immortalis|powervr|imagination/;
+
+/**
  * Classifies a device from what it reports about itself.
  *
- * Deliberately coarse. The properties a `Device` exposes - its backend, its storage limits, its
- * reported vendor - separate a phone from a workstation reliably and separate two workstations not
- * at all, so this sorts into the buckets it can actually distinguish and leaves finer tuning to an
- * explicit budget.
+ * Deliberately coarse. What a `Device` reports - its backend, its GPU family and kind
+ * (`info.gpu`, `info.gpuType`), vendor and architecture strings, and its storage limits - separates
+ * a phone from a workstation reliably and two workstations not at all, so this sorts into the
+ * buckets it can actually distinguish and leaves finer tuning to an explicit budget.
+ *
+ * @param device The device the layer renders with.
+ * @returns The device class whose preset in {@link SPLAT_DEVICE_BUDGETS} applies.
  */
 export function getSplatDeviceClass(device: Device): SplatDeviceClass {
   // WebGL2 has no storage buffers, so a splat scene is sorted and repacked on the CPU there. That
@@ -71,16 +99,21 @@ export function getSplatDeviceClass(device: Device): SplatDeviceClass {
     return 'mobile';
   }
 
-  const info = device.info as {type?: string; vendor?: string; gpu?: string} | undefined;
-  const description = `${info?.vendor ?? ''} ${info?.gpu ?? ''}`.toLowerCase();
-  if (/adreno|mali|powervr|immortalis/.test(description)) {
+  // `info.type` is the backend; the kind of GPU is `gpuType` and its family is `gpu`.
+  const {gpu, gpuType, vendor, renderer, gpuArchitecture} = device.info;
+  if (gpuType === 'cpu' || gpu === 'software') {
+    // A software rasterizer has no memory of its own to budget and far less throughput than any GPU.
     return 'mobile';
   }
-  if (/apple/.test(description) && info?.type === 'integrated-gpu') {
+  const description = `${vendor} ${renderer} ${gpuArchitecture ?? ''}`.toLowerCase();
+  if (MOBILE_GPU_PATTERN.test(description)) {
+    return 'mobile';
+  }
+  if (gpu === 'apple' && gpuType !== 'discrete') {
     // Apple silicon shares memory between CPU and GPU but has ample bandwidth for it.
     return 'mobile-high';
   }
-  if (info?.type === 'integrated-gpu') {
+  if (gpuType === 'integrated') {
     return 'integrated';
   }
 
@@ -98,11 +131,56 @@ export function getSplatDeviceClass(device: Device): SplatDeviceClass {
  * Returns the residency budget to stream a scene with on this device.
  *
  * @param overrides Applied on top of the preset, so a caller can cap bytes without restating the
- * splat count or vice versa.
+ * splat count or vice versa. See {@link applySplatBudgetOverrides} for how a splat count alone is
+ * read.
  */
 export function getSplatDeviceBudget(
   device: Device,
   overrides?: SplatResidencyBudget
 ): SplatResidencyBudget {
-  return {...SPLAT_DEVICE_BUDGETS[getSplatDeviceClass(device)], ...overrides};
+  return applySplatBudgetOverrides(SPLAT_DEVICE_BUDGETS[getSplatDeviceClass(device)], overrides);
+}
+
+/**
+ * Applies caller overrides to a preset.
+ *
+ * Fields an override leaves `undefined` - or sets to `undefined` explicitly, as an object spread of
+ * optional props does - keep the preset's value rather than erasing it.
+ *
+ * A preset's byte ceiling is not an independent limit: it is its splat count priced at
+ * {@link RESIDENT_BYTES_PER_SPLAT}. So an override that names a splat count and no byte ceiling
+ * gets the byte ceiling that splat count implies, rather than keeping the preset's - otherwise
+ * raising the count above the preset raises nothing, and the window fills on bytes at the preset's
+ * size while the traversal plans for the count it was given.
+ */
+export function applySplatBudgetOverrides(
+  preset: SplatResidencyBudget,
+  overrides?: SplatResidencyBudget | null
+): SplatResidencyBudget {
+  const definedOverrides = Object.fromEntries(
+    Object.entries(overrides ?? {}).filter(([, value]) => value !== undefined)
+  ) as SplatResidencyBudget;
+  const {maxResidentSplats, maxGpuBytes} = definedOverrides;
+  const impliedGpuBytes =
+    maxResidentSplats !== undefined && maxGpuBytes === undefined
+      ? {maxGpuBytes: getSplatGpuBytes(maxResidentSplats)}
+      : {};
+  return {...preset, ...definedOverrides, ...impliedGpuBytes};
+}
+
+/** The GPU bytes a number of resident splats is budgeted to cost. */
+function getSplatGpuBytes(splatCount: number): number {
+  return splatCount * RESIDENT_BYTES_PER_SPLAT;
+}
+
+/**
+ * The resident splats a GPU byte ceiling holds at a given cost per splat.
+ *
+ * @param bytesPerSplat What one resident splat actually costs; defaults to the preset pricing.
+ */
+export function getSplatCountForGpuBytes(
+  gpuBytes: number,
+  bytesPerSplat: number = RESIDENT_BYTES_PER_SPLAT
+): number {
+  return Math.floor(gpuBytes / Math.max(bytesPerSplat, 1));
 }

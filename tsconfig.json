@@ -40,11 +40,6 @@
       "@deck.gl/mesh-layers": ["./modules/mesh-layers/src"],
       "@deck.gl/react": ["./modules/react/src"],
       "@deck.gl/splat-layers": ["./modules/splat-layers/src"],
-      // The opacity-ramp controller is shared with the experimental example's copy of the layer
-      // rather than duplicated into it; see `examples/experimental/swiss-splat-terrain`.
-      "@deck.gl/splat-layers/fade-controller": [
-        "./modules/splat-layers/src/splat-fade-controller"
-      ],
       "@deck.gl/test-utils": ["./modules/test-utils/src"],
 
       "deck.gl-test/*": ["./test/*"]
