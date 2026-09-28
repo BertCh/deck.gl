@@ -11,7 +11,7 @@
  */
 
 import type {TerrainHaze} from './terrain-surfels';
-import type {TileAddress} from './scripts/terrain-grid';
+import type {TileAddress} from './terrain-grid';
 
 /** The two rasters a splat tile is cut from, keyed so siblings can share a decode. */
 export type TerrainTileSources = {

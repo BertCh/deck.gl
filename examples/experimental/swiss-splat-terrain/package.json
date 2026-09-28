@@ -6,13 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "vite --config vite.config.mjs --open",
-    "start-local": "DECK_SOURCE=1 vite --config vite.config.mjs",
     "build": "vite build --config vite.config.mjs",
-    "typecheck": "tsc --noEmit",
-    "bake": "node --experimental-strip-types --no-warnings scripts/bake-splat-scene.ts",
-    "simulate-lod": "node --experimental-strip-types --no-warnings scripts/simulate-lod.ts",
-    "bake-terrain": "node --experimental-strip-types --no-warnings scripts/bake-terrain-splats.ts",
-    "verify-terrain": "node --experimental-strip-types --no-warnings scripts/verify-terrain-archive.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@deck.gl/core": "^9.4.0",
@@ -30,7 +25,6 @@
   "devDependencies": {
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
-    "sharp": "^0.35.4",
     "typescript": "^5.9.0",
     "vite": "^7.3.3"
   }

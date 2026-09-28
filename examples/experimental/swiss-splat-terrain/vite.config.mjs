@@ -101,65 +101,30 @@ const aliases = [
   pinScope('@probe.gl', exampleModules)
 ];
 
-// LUMA_SOURCE=<path> runs the example against a luma.gl checkout's sources. It implies
-// DECK_SOURCE, because the splat layer in `modules/splat-layers` and the splat renderer in
-// `@luma.gl/splats` have to come from the same side of any unreleased API change.
+// LUMA_SOURCE=<path> runs the example against a luma.gl checkout's sources, and it is required:
+// `@deck.gl/splat-layers` is unreleased and calls `@luma.gl/splats` APIs that no published luma.gl
+// has yet, so the layer and the renderer have to come from source together. deck.gl comes from this
+// repo's `modules/*/src` for the same reason.
 const lumaSource = process.env.LUMA_SOURCE;
-if (lumaSource) {
-  aliases.unshift(...aliasLumaSources(lumaSource));
-}
-
-// DECK_SOURCE=1 runs the example against this repo's TypeScript sources instead of the
-// published deck.gl packages. Without LUMA_SOURCE, luma stays pinned above so deck.gl and the
-// splat renderer continue to share a single Device implementation.
-if (process.env.DECK_SOURCE || lumaSource) {
-  aliases.unshift({
-    find: /^@deck\.gl\/([^/]+)$/,
-    replacement: join(repoRoot, 'modules/$1/src')
-  });
-}
-
-// `@deck.gl/splat-layers` is unreleased, and it calls `@luma.gl/splats` APIs that are unreleased
-// too, so it is only usable when both come from source. Everywhere else the example falls back to
-// its own copy of the layer: the same code before it was promoted, minus the compute stage,
-// deck.gl picking and clipping. Pointing at the promoted module without LUMA_SOURCE would fail on
-// a missing luma export rather than on anything the reader did wrong.
 if (!lumaSource) {
-  aliases.unshift({
-    find: /^@deck\.gl\/splat-layers$/,
-    replacement: join(exampleDir, 'splat-layer.ts')
-  });
+  throw new Error(
+    'swiss-splat-terrain needs LUMA_SOURCE=<path to a luma.gl checkout of the deck-splat-layers ' +
+      'branch>, e.g. `LUMA_SOURCE=~/Documents/GitHub/vis.gl-build/luma.gl npm start`. ' +
+      'See SPLAT-LAYERS-BRANCH.md at the repo root.'
+  );
 }
-
-// The opacity-ramp controller is shared rather than copied, in both modes.
-//
-// It is the one part of the promoted module that touches no `@luma.gl` API at all - it is written
-// against a structural type that `GPUSplatData` happens to satisfy - so it resolves against the
-// published packages exactly as well as against a source checkout. Aliasing it here is what keeps
-// the fork above from growing a second, drifting implementation of the anti-popping behaviour, which
-// is the whole reason the fork is a liability in the first place.
+aliases.unshift(...aliasLumaSources(lumaSource));
 aliases.unshift({
-  find: '@deck.gl/splat-layers/fade-controller',
-  replacement: join(repoRoot, 'modules/splat-layers/src/splat-fade-controller.ts')
+  find: /^@deck\.gl\/([^/]+)$/,
+  replacement: join(repoRoot, 'modules/$1/src')
 });
 
 export default defineConfig({
-  define: {
-    /**
-     * Whether the build is running the promoted `@deck.gl/splat-layers` rather than the fork above.
-     *
-     * A few of the layer's fidelity controls - the analytic fragment kernel, the antialiasing mode,
-     * the depth-key distribution - call `@luma.gl/splats` APIs that are not in a published release, so
-     * they exist only on the promoted layer. The app reads this to offer them exactly when they are
-     * real, instead of silently passing props that nothing consumes.
-     */
-    __PROMOTED_SPLAT_LAYER__: JSON.stringify(Boolean(lumaSource))
-  },
-  plugins: lumaSource || process.env.DECK_SOURCE ? [resolveFromExample(exampleModules)] : [],
+  plugins: [resolveFromExample(exampleModules)],
   resolve: {alias: aliases},
-  // `repoRoot` so the shared fade controller - and, in source mode, `modules/*/src` - can be served
-  // from outside this folder.
-  server: {port: 8080, fs: {allow: [exampleDir, repoRoot]}},
+  // `modules/*/src` and the luma.gl checkout both live outside this folder, and Vite refuses to serve
+  // either to the browser unless they are allowed here.
+  server: {port: 8080, fs: {allow: [exampleDir, repoRoot, lumaSource]}},
   optimizeDeps: {esbuildOptions: {target: 'es2022'}},
   build: {target: 'es2022'}
 });

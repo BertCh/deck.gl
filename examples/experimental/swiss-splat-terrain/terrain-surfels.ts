@@ -6,11 +6,8 @@
  * One block of an elevation raster plus the same block of an imagery raster in; one tile's worth of
  * oriented Gaussians out.
  *
- * This is the whole of the "preprocessing pipeline", and it is deliberately the *only* copy of it:
- * `scripts/bake-terrain-splats.ts` runs it in Node to publish an archive, and
- * `terrain-tile.worker.ts` runs it in the browser while the camera is moving. A bake and a live
- * stream that disagreed about what a splat is would make the two halves of this example
- * incomparable, which is the one thing it exists to let you do.
+ * This is the whole of the "preprocessing pipeline": `terrain-tile.worker.ts` runs it in the
+ * browser while the camera is moving.
  *
  * ## What it is doing, per splat
  *
@@ -43,7 +40,7 @@
  */
 
 import {
-  BAKE_TILING,
+  TERRAIN_TILING,
   decodeTerrarium,
   getElevationBlock,
   getImageryBlock,
@@ -54,7 +51,7 @@ import {
   unitsPerMeter,
   type TerrainTiling,
   type TileAddress
-} from './scripts/terrain-grid.ts';
+} from './terrain-grid';
 
 /** A decoded raster, in whatever interleaving the decoder produced. */
 export type TerrainRaster = {
@@ -97,10 +94,10 @@ export type TerrainSurfelOptions = {
   /** Colour used where imagery failed to load, as display-space RGB in `[0, 255]`. */
   missingImageryRgb: readonly [number, number, number];
   haze?: TerrainHaze | null;
-  /** How the node is cut out of the two rasters. Defaults to the baker's. */
+  /** How the node is cut out of the two rasters. Defaults to {@link TERRAIN_TILING}. */
   tiling?: TerrainTiling;
   /**
-   * How the colour column is stored. Defaults to `'float32'`, which is what the archive publishes.
+   * How the colour column is stored. Defaults to `'float32'`.
    *
    * **Prefer `'uint8'` for anything drawn live.** These colours are display-referred - the same
    * space a PLY's DC term is in, and the space the renderer blends in - so eight bits a channel is
@@ -144,14 +141,7 @@ export type TerrainSurfelColumns = {
  */
 export const MAXIMUM_SLOPE_STRETCH = 3;
 
-/**
- * The numbers that decide what a terrain splat *is*, shared by the bake and the live stream.
- *
- * Both paths call {@link buildTerrainSurfels}, and both take their options from here. A bake and a
- * live stream that disagreed about any of these would make `Lauterbrunnen terrain` and
- * `Lauterbrunnen, live` two different pictures, which is the one comparison this example exists to
- * let you make.
- */
+/** The numbers that decide what a terrain splat *is*, passed to {@link buildTerrainSurfels}. */
 export const TERRAIN_SURFEL_DEFAULTS = {
   /**
    * In-plane extent of a splat as a fraction of the distance to its neighbour.
@@ -161,11 +151,15 @@ export const TERRAIN_SURFEL_DEFAULTS = {
    * as a continuous surface instead of a bed of nails; much below it the grid shows through, and
    * much above it the terrain turns to soup.
    *
-   * 0.55 rather than a clean half. At exactly 0.5 the sample lattice is still faintly legible on
-   * open ground under grazing light, and closing it costs nothing that matters: a splat's extent is
-   * three floats in a column, not another splat.
+   * **0.7, measured.** At 0.55 the sample lattice shows as a fine grid of dots on every close
+   * hillside at 2x device pixels - each splat's centre reads through because the diagonal
+   * neighbours overlap too little to close the gap. Swept on a fixed close Matterhorn camera:
+   * 0.62 still leaves dots along snow edges, 0.66 faint traces, 0.7 is clean, and 0.9 is only
+   * softer. At distance 0.66 and 0.7 are indistinguishable, and frame time does not move, so
+   * closing it costs nothing that matters: a splat's extent is three floats in a column, not
+   * another splat. Thickness does not affect the dots - 0.12 and 0.45 show the same grid.
    */
-  sigma: 0.55,
+  sigma: 0.7,
 
   /**
    * Thickness along the surface normal, as a fraction of the in-plane extent.
@@ -216,8 +210,8 @@ export const TERRAIN_SURFEL_DEFAULTS = {
    * Small on purpose. The imagery is the data and the shading is an annotation on it: at 0.32 a
    * slope facing the sun is about 30% brighter than one facing away, which is enough for a ridge to
    * read as a ridge and not enough to turn the photograph into a hillshade. Raise it and the
-   * terrain starts to look like a relief map with a picture on it; drop it to 0 and you get what
-   * this example baked before - geometry you cannot see.
+   * terrain starts to look like a relief map with a picture on it; drop it to 0 and you get
+   * geometry you cannot see.
    */
   relief: 0.32,
 
@@ -261,7 +255,7 @@ export function buildTerrainSurfels(
   imagery: TerrainRaster | null,
   options: TerrainSurfelOptions
 ): TerrainSurfelColumns {
-  const tiling = options.tiling ?? BAKE_TILING;
+  const tiling = options.tiling ?? TERRAIN_TILING;
   const {gridSize} = tiling;
   const elevationBlock = getElevationBlock(tile, tiling);
   const imageryBlock = getImageryBlock(tile, tiling);
@@ -425,7 +419,7 @@ export function buildTerrainSurfels(
       const lambert = Math.max(normal[0] * sun[0] + normal[1] * sun[1] + normal[2] * sun[2], 0);
       const shade = ambient + options.relief * lambert;
 
-      // Stored the way the PLY decoder stores its DC term: the colour as displayed, not linearized,
+      // Stored the way a 3DGS PLY's DC term decodes: the colour as displayed, not linearized,
       // because that is the space 3D Gaussian Splatting is trained and rendered in.
       let r = (red / 255) * shade;
       let g = (green / 255) * shade;

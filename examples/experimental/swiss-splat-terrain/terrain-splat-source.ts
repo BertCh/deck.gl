@@ -9,8 +9,7 @@
  *
  * It is not a level-of-detail implementation. `SplatHierarchyManager` inside `SplatLayer` already
  * does the traversal, the frustum culling, the screen-space-error test, the priority ordering, the
- * bounded load scheduling, the coarse-ancestor fallback and the residency window - the same code the
- * baked archive streams through. All this supplies is the three things the traversal cannot know for
+ * bounded load scheduling, the coarse-ancestor fallback and the residency window. All this supplies is the three things the traversal cannot know for
  * a tile service:
  *
  * 1. **Where the nodes are.** A `z/x/y` quadtree over a raster endpoint, in scene metres.
@@ -19,7 +18,7 @@
  *
  * ## Why the tree grows
  *
- * An archive knows its whole tree from its manifest. A tile service has no bottom: Mapterhorn serves
+ * A tile service has no bottom: Mapterhorn serves
  * zoom 12 worldwide and zoom 17 over Switzerland, and the only way to find the edge of a regional
  * archive is to ask past it. So nodes are created one level ahead of the frontier - when a node's
  * page lands, its four children are appended - and `SplatHierarchySource.subscribe` tells the layer
@@ -71,7 +70,7 @@ import {
   getSplatSpacing,
   getTileGroundSize,
   latitudeToTileY,
-  LIVE_TILING,
+  TERRAIN_TILING,
   longitudeToTileX,
   projectFlat,
   tileKey,
@@ -79,10 +78,10 @@ import {
   tileYToLatitude,
   unitsPerMeter,
   type TileAddress
-} from './scripts/terrain-grid';
+} from './terrain-grid';
 
 /** Splats a live tile carries. */
-export const LIVE_SPLATS_PER_TILE = LIVE_TILING.gridSize * LIVE_TILING.gridSize;
+export const LIVE_SPLATS_PER_TILE = TERRAIN_TILING.gridSize * TERRAIN_TILING.gridSize;
 
 /**
  * Coarsest and finest zoom the quadtree may emit.
@@ -179,9 +178,8 @@ export type TerrainSplatSourceProps = {
   /**
    * Metres each splat is pushed along its own normal, to clear the mesh drawn underneath it.
    *
-   * The same number and the same reason as the baker's: a `TerrainLayer` built from the same
-   * elevation service at `meshMaxError: 4` is a coarser reading of the surface than one splat per
-   * elevation sample, so on a convex ridge the triangles cut *outside* the splats and hide the
+   * A `TerrainLayer` built from the same elevation service at `meshMaxError: 4` is a coarser
+   * reading of the surface than one splat per elevation sample, so on a convex ridge the triangles cut *outside* the splats and hide the
    * surface they were built from. Lifting along the normal rather than vertically is what keeps a
    * cliff face from sliding sideways as it clears.
    */
@@ -297,6 +295,12 @@ export class TerrainSplatSource implements SplatHierarchySource {
       });
       worker.onmessage = (event: MessageEvent<TerrainTileResponse>) =>
         this._onWorkerMessage(worker, event.data);
+      // A worker that fails to start (or throws outside a request) never answers, so everything in
+      // flight would wait forever. Fail it all; the traversal re-requests what it still wants.
+      worker.onerror = (event: ErrorEvent) => {
+        event.preventDefault();
+        this._failInFlight(new Error(`terrain worker failed: ${event.message}`));
+      };
       this.workers.push(worker);
       this.workerLoad.set(worker, 0);
     }
@@ -452,7 +456,7 @@ export class TerrainSplatSource implements SplatHierarchySource {
       geometricError: getSplatSpacing(
         tile.z,
         tileYToLatitude(tile.y + 0.5, tile.z),
-        LIVE_TILING.gridSize
+        TERRAIN_TILING.gridSize
       ),
       estimatedSplatCount: LIVE_SPLATS_PER_TILE,
       // Finer children replace this node rather than adding to it: two levels of the same surface
@@ -520,7 +524,7 @@ export class TerrainSplatSource implements SplatHierarchySource {
 
   /** Whether a tile's elevation raster is already known to be outside the host's coverage. */
   private _isKnownMissing(tile: TileAddress): boolean {
-    return this.missingRasters.has(tileKey(getElevationBlock(tile, LIVE_TILING).tile));
+    return this.missingRasters.has(tileKey(getElevationBlock(tile, TERRAIN_TILING).tile));
   }
 
   /**
@@ -534,8 +538,8 @@ export class TerrainSplatSource implements SplatHierarchySource {
     if (this.destroyed) {
       return Promise.reject(new DOMException('terrain source destroyed', 'AbortError'));
     }
-    const elevationBlock = getElevationBlock(node.tile, LIVE_TILING);
-    const imageryBlock = getImageryBlock(node.tile, LIVE_TILING);
+    const elevationBlock = getElevationBlock(node.tile, TERRAIN_TILING);
+    const imageryBlock = getImageryBlock(node.tile, TERRAIN_TILING);
     const elevationKey = tileKey(elevationBlock.tile);
     if (this.missingRasters.has(elevationKey)) {
       return Promise.reject(new MissingTerrainError(node.id));
@@ -615,6 +619,17 @@ export class TerrainSplatSource implements SplatHierarchySource {
     return best;
   }
 
+  /** Rejects every in-flight request; see the workers' `onerror`. */
+  private _failInFlight(error: Error): void {
+    for (const pending of this.inFlight.values()) {
+      pending.reject(error);
+    }
+    this.inFlight.clear();
+    for (const worker of this.workers) {
+      this.workerLoad.set(worker, 0);
+    }
+  }
+
   private _onWorkerMessage(worker: Worker, response: TerrainTileResponse): void {
     this.workerLoad.set(worker, Math.max(0, (this.workerLoad.get(worker) ?? 1) - 1));
     const pending = this.inFlight.get(response.key);
@@ -660,7 +675,7 @@ export class TerrainSplatSource implements SplatHierarchySource {
     if (!node) {
       return;
     }
-    this.missingRasters.add(tileKey(getElevationBlock(node.tile, LIVE_TILING).tile));
+    this.missingRasters.add(tileKey(getElevationBlock(node.tile, TERRAIN_TILING).tile));
     // Every sibling cut from the same raster goes too, without any of them having to ask.
     for (const candidate of [...this.nodesByKey.values()]) {
       if (candidate.tile.z === node.tile.z && this._isKnownMissing(candidate.tile)) {
@@ -689,11 +704,17 @@ export class TerrainSplatSource implements SplatHierarchySource {
       key,
       setTimeout(() => {
         this.retrying.delete(key);
-        if (this.destroyed || !parent || !this.nodesByKey.has(parent.id)) {
+        if (this.destroyed || this.nodesByKey.has(key)) {
           return;
         }
-        const restored = this._createNode(node.tile, parent);
-        parent.children = [...(parent.children ?? []), restored];
+        if (!parent) {
+          // A root has nothing above it to hang back under: it goes straight back into the roots.
+          this.roots = [...this.roots, this._createNode(node.tile, null)];
+        } else if (this.nodesByKey.has(parent.id)) {
+          parent.children = [...(parent.children ?? []), this._createNode(node.tile, parent)];
+        } else {
+          return;
+        }
         this._scheduleNotify();
       }, RETRY_DELAY_MS)
     );

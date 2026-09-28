@@ -2,7 +2,28 @@
 
 * **Author**: Robert Christie
 * **Date**: September 2026
-* **Status**: **Conceptual Draft**
+* **Status**: **Conceptual Draft**, partly implemented (see Status)
+
+## Status (2026-09-28)
+
+This RFC was written against `@luma.gl/splats@9.4.2` and an earlier state of
+`examples/experimental/swiss-splat-terrain`. The `splat-layers` branch has since implemented part of
+the plan, so the "Current state, read from the code" section describes the starting point, not the
+branch:
+
+- **Done on the branch:** W2.1–W2.3 (Mip-Splatting compensation, a 0.3 px² filter variance, linear
+  and float16 depth keys), W3.1 (radix sort tiling), W5.1 (`@deck.gl/splat-layers`), W5.2 (a
+  `compute` stage in the deck.gl layer lifecycle), W5.3 (`presentation: false`), W5.4 (WebGPU
+  picking) and W5.5 (`SplatClipExtension`), plus a residency budget and view-weighted streaming LOD
+  toward W6. The luma.gl side is on the luma.gl `deck-splat-layers` branch.
+- **Prototyped and removed:** the baked LOD archive, its baker and verifier, and the PLY captures.
+  The example now streams live terrain only, so the archive analysis below (including the settling
+  experiment and `bake-splat-scene.ts`) is design history rather than a description of code in the
+  repository.
+- **Not started:** W0, W1, W4, and the rest of W3, W5 and W6.
+
+The literature figures below were gathered at search level and are marked unverified where they
+were not checked against the source.
 
 ## Summary
 

@@ -1,32 +1,28 @@
 {
+  "extends": "../../../tsconfig.json",
   "compilerOptions": {
-    "target": "es2022",
-    "lib": ["es2022", "dom", "dom.iterable"],
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "strict": true,
     "noEmit": true,
-    "skipLibCheck": true,
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    // The bake scripts run under `node --experimental-strip-types`, which requires relative
-    // imports to carry their real `.ts` extension.
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "baseUrl": ".",
-    // Typechecking follows the default, published-package build, where `@deck.gl/splat-layers`
-    // resolves to this folder's copy of the layer. Source mode swaps in the promoted module
-    // through the matching Vite alias.
+    "jsx": "react-jsx",
+    // Mirrors the Vite aliases: deck.gl from this repo's sources, luma.gl from the `deck-splat-layers`
+    // checkout. `tsc` cannot read `LUMA_SOURCE`, so it assumes the checkout sits where
+    // SPLAT-LAYERS-BRANCH.md puts it, at `vis.gl-build/luma.gl` beside this repository.
     "paths": {
-      // The ramp controller is shared with the promoted module rather than copied; see the
-      // matching Vite alias for why that resolves in both modes.
-      "@deck.gl/splat-layers/fade-controller": [
-        "../../../modules/splat-layers/src/splat-fade-controller.ts"
+      "@deck.gl/*": ["../../../modules/*/src"],
+      // The published React bindings and widgets, typed against the source core above. Their sources
+      // are Preact JSX, which only typechecks under the widgets module's own settings.
+      "@deck.gl/react": ["./node_modules/@deck.gl/react"],
+      "@deck.gl/widgets": ["./node_modules/@deck.gl/widgets"],
+      "@luma.gl/*": ["../../../../vis.gl-build/luma.gl/modules/*/src"],
+      // Subpath exports that do not follow `modules/*/src`, as `aliasLumaSources` reads them.
+      "@luma.gl/gpgpu/gpu-core": ["../../../../vis.gl-build/luma.gl/modules/gpgpu/src/gpu-core"],
+      "@luma.gl/gpgpu/gpu-data": ["../../../../vis.gl-build/luma.gl/modules/gpgpu/src/gpu-data"],
+      "@luma.gl/experimental/gpu-tables": [
+        "../../../../vis.gl-build/luma.gl/modules/experimental/src/gpu-tables"
       ],
-      "@deck.gl/splat-layers": ["./splat-layer.ts"]
-    }
+      "@luma.gl/shadertools/wgsl": ["../../../../vis.gl-build/luma.gl/modules/shadertools/src/wgsl"]
+    },
+    "types": ["@webgpu/types"],
+    "typeRoots": ["../../../node_modules/@types", "../../../node_modules"]
   },
-  "include": ["*.ts", "*.tsx", "scripts/**/*.ts"]
+  "include": ["*.ts", "*.tsx"]
 }

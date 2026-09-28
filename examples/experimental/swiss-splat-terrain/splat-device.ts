@@ -7,11 +7,11 @@
  *
  * ## Why this file exists
  *
- * `GPUSplatGraphRenderer` keeps one projected record per resident splat -- 48 bytes of clip-space
- * centre, two screen-space axes and a colour -- in a **single storage binding**. WebGPU's default
- * limit for one storage binding is 128 MiB, so that binding alone caps the scene at about 2.8M
- * splats, and `resolveSplatCapacity` throws `projected records exceed the device storage binding
- * limit` past it.
+ * `GPUSplatGraphRenderer` keeps one projected record per resident splat -- 32 bytes
+ * (`GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH`) of clip-space centre, two screen-space axes and a
+ * colour -- in a **single storage binding**. WebGPU's default limit for one storage binding is
+ * 128 MiB, so that binding alone caps the scene at about 4.2M splats, and `resolveSplatCapacity`
+ * throws `projected records exceed the device storage binding limit` past it.
  *
  * That cap is not the hardware's. The adapter on this machine reports **4 GiB**; 128 MiB is what a
  * device gets when nobody asks for more. luma.gl only forwards `requiredLimits` when
@@ -30,27 +30,10 @@
 import {webgpuAdapter} from '@luma.gl/webgpu';
 import type {WebGPUAdapter} from '@luma.gl/webgpu';
 import type {Device} from '@luma.gl/core';
+import {GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH} from '@luma.gl/splats';
 
-/**
- * The two WebGPU shapes this file touches, declared locally.
- *
- * `@webgpu/types` is only in `node_modules` as luma.gl's own dependency, and pulling the whole DOM
- * surface in to name two fields would make this example depend on it.
- */
-type GPUAdapterLike = {
-  limits: {maxStorageBufferBindingSize: number; maxBufferSize: number};
-  requestDevice(descriptor?: GPUDeviceDescriptorLike): Promise<unknown>;
-};
-type GPUDeviceDescriptorLike = {requiredLimits?: Record<string, number>};
-
-/**
- * Bytes of GPU storage the splat graph spends per resident splat, projecting it once per frame.
- *
- * `GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH` in `@luma.gl/splats`, which released versions do not
- * export. Copied rather than imported, and asserted against nothing -- if luma.gl grows the record,
- * the budget below is conservative by exactly the ratio and the renderer still refuses to overrun.
- */
-const PROJECTED_RECORD_BYTES = 48;
+/** Bytes of GPU storage the splat graph spends per resident splat, projecting it once per frame. */
+const PROJECTED_RECORD_BYTES = GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH;
 
 /**
  * Headroom between the residency budget and the capacity the graph is reserved for.
@@ -83,11 +66,7 @@ const DEFAULT_STORAGE_BINDING_BYTES = 128 * 1024 * 1024;
  * `requestDevice` merges `requiredLimits` into whatever descriptor luma.gl passes.
  */
 export function createSplatWebGPUAdapter(): WebGPUAdapter {
-  const gpu = (
-    globalThis.navigator as {
-      gpu?: {requestAdapter(options?: unknown): Promise<GPUAdapterLike | null>};
-    }
-  ).gpu;
+  const gpu = globalThis.navigator?.gpu as GPU | undefined;
   if (!gpu) {
     return webgpuAdapter;
   }
@@ -96,10 +75,10 @@ export function createSplatWebGPUAdapter(): WebGPUAdapter {
   // class as a type only. `create()` reaches its adapter through `this.requestGPUAdapter`, so an
   // override on a descendant object is all it takes; everything else resolves up the chain.
   const adapter = Object.create(webgpuAdapter) as WebGPUAdapter & {
-    requestGPUAdapter(options?: unknown): Promise<GPUAdapterLike | null>;
+    requestGPUAdapter(options?: GPURequestAdapterOptions): Promise<GPUAdapter | null>;
   };
 
-  adapter.requestGPUAdapter = async (options?: unknown) => {
+  adapter.requestGPUAdapter = async (options?: GPURequestAdapterOptions) => {
     const gpuAdapter = await gpu.requestAdapter(options);
     if (!gpuAdapter) {
       return null;
@@ -119,7 +98,7 @@ export function createSplatWebGPUAdapter(): WebGPUAdapter {
     return new Proxy(gpuAdapter, {
       get(target, property) {
         if (property === 'requestDevice') {
-          return async (descriptor: GPUDeviceDescriptorLike = {}) => {
+          return async (descriptor: GPUDeviceDescriptor = {}) => {
             const requiredLimits = {
               ...descriptor.requiredLimits,
               maxStorageBufferBindingSize: storageBindingBytes,

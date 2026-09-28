@@ -14,7 +14,7 @@
  *
  * ## Why the source decode is cached
  *
- * A splat tile is not built from the raster at its own `z/x/y`. Under `LIVE_TILING` it is cut out of
+ * A splat tile is not built from the raster at its own `z/x/y`. Under `TERRAIN_TILING` it is cut out of
  * the elevation tile three zooms up and the imagery tile two zooms up, so one elevation fetch serves
  * sixty-four tiles and one imagery fetch serves sixteen - and nothing fetched is thrown away, because
  * the block arithmetic puts exactly one elevation pixel and one imagery pixel under every splat.
@@ -35,9 +35,9 @@ import {
   type TerrainTileResponse,
   type TerrainTileSources
 } from './terrain-tile-protocol';
-import {assertTilingIsExact, LIVE_TILING} from './scripts/terrain-grid';
+import {assertTilingIsExact, TERRAIN_TILING} from './terrain-grid';
 
-assertTilingIsExact(LIVE_TILING);
+assertTilingIsExact(TERRAIN_TILING);
 
 /** Colour used where imagery failed to load. Grey, so relief still reads. */
 const MISSING_IMAGERY_RGB: readonly [number, number, number] = [150, 152, 156];
@@ -50,8 +50,8 @@ const MISSING_IMAGERY_RGB: readonly [number, number, number] = [150, 152, 156];
  * It is a small term whose job is to let a ridge read as a ridge on a projector, where the imagery's
  * own contrast is the first thing to go.
  *
- * Must stay in step with `SUN` in `scripts/bake-terrain-splats.ts` and with the `LightingEffect`
- * in `app.tsx`, or the live tiles, the baked archive and the mesh shade differently.
+ * Must stay in step with the `LightingEffect` in `app.tsx`, or the splats and the mesh under them
+ * shade differently.
  */
 const SUN: readonly [number, number, number] = (() => {
   const vector: [number, number, number] = [-0.48, 0.42, 0.77];
@@ -99,14 +99,14 @@ async function handleRequest(request: TerrainTileRequest): Promise<void> {
       sun: SUN,
       missingImageryRgb: MISSING_IMAGERY_RGB,
       haze: request.haze,
-      tiling: LIVE_TILING,
+      tiling: TERRAIN_TILING,
       // Display-referred colour in eight bits a channel. See `colorFormat`: a float colour column
       // would put the whole scene through Reinhard tone mapping at half brightness.
       colorFormat: 'uint8'
     });
     const built: TerrainTileColumns = {
       key: request.key,
-      count: LIVE_TILING.gridSize * LIVE_TILING.gridSize,
+      count: TERRAIN_TILING.gridSize * TERRAIN_TILING.gridSize,
       positions: columns.positions,
       scales: columns.scales,
       rotations: columns.rotations,
@@ -201,7 +201,9 @@ function getRaster(key: string, url: string): Promise<TerrainRaster> {
 /** Fetch and decode one raster tile to RGBA bytes. */
 async function decodeRaster(url: string): Promise<TerrainRaster> {
   const response = await fetch(url);
-  if (!response.ok) {
+  // `204 No Content` is `ok`, but it is how the elevation host says it has no archive here: there
+  // is no body to decode.
+  if (!response.ok || response.status === 204) {
     throw new HttpError(response.status, url);
   }
   const bitmap = await createImageBitmap(await response.blob());

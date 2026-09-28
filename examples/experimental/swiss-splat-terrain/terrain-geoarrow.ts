@@ -8,9 +8,8 @@
  *
  * ## What this module is for
  *
- * The baked half of this example makes a narrow claim: a splat archive can be published and streamed
- * like any other tiled dataset. This is that claim with the archive taken away. The inputs are a
- * public elevation service and public orthophotography on the plain `{z}/{x}/{y}` endpoints anybody
+ * The claim is narrow: Gaussian splats can be streamed like any other tiled dataset, with no
+ * preprocessing and nothing published for them. The inputs are a public elevation service and public orthophotography on the plain `{z}/{x}/{y}` endpoints anybody
  * can fetch, and the thing in the middle is ordinary columnar geospatial data:
  *
  * ```text

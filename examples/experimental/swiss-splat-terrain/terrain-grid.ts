@@ -3,11 +3,11 @@
 // Copyright (c) vis.gl contributors
 
 /**
- * The tile arithmetic the terrain baker runs on, and nothing else. Imports nothing.
+ * The tile arithmetic the terrain source runs on, and nothing else. Imports nothing.
  *
- * Kept separate from `bake-terrain-splats.ts` because it is the part that is easy to get subtly
- * wrong and easy to check in isolation: which raster tile backs which splat node, where inside it,
- * and what a pixel's position actually is once it reaches deck.gl's common space.
+ * Kept separate because it is the part that is easy to get subtly wrong and easy to check in
+ * isolation: which raster tile backs which splat node, where inside it, and what a pixel's position
+ * actually is once it reaches deck.gl's common space.
  */
 
 /** Semi-major axis of the WGS 84 ellipsoid, which Web Mercator treats as a sphere. */
@@ -22,16 +22,16 @@ const COMMON_WORLD_SIZE = 512;
  *
  * `getDistanceScales` divides by a flat `40.03e6` rather than `2 * PI * 6378137` = `40075017`, a
  * difference of 0.11%. That looks like a rounding choice and is harmless on its own — but the
- * layer converts scene units back to common space with deck's number, so baking positions with
- * the *true* circumference and expanding them with deck's leaves a 0.11% scale error. Over a
- * 3.4 km archive that is nearly four metres of drift at the edges, which on a hillside is a
- * visible slip between the splats and the mesh underneath them.
+ * layer converts scene units back to common space with deck's number, so building positions with
+ * the *true* circumference and expanding them with deck's leaves a 0.11% scale error. A few
+ * kilometres from the origin that is metres of drift, which on a hillside is a visible slip
+ * between the splats and the mesh underneath them.
  *
  * So the two are kept apart deliberately: ground *sizes* use the real circumference, because a
  * splat's extent is a real distance, and the conversion to common space uses deck's, because
  * that conversion has to be exactly undone by code this file does not control.
  */
-const DECK_EARTH_CIRCUMFERENCE = 40.03e6;
+export const DECK_EARTH_CIRCUMFERENCE = 40.03e6;
 
 /** Native pixel size of each raster source. */
 export const ELEVATION_TILE_SIZE = 512;
@@ -55,61 +55,27 @@ export type TerrainTiling = {
 };
 
 /**
- * What the baker publishes: 128 x 128, or 16,384 splats a node.
+ * How the source cuts its nodes: 128 x 128, or 16,384 splats a node.
  *
- * A baked archive has a fixed budget known in advance and no camera to adapt to while it is being
- * written, so the larger node is the better trade: fewer manifest entries, fewer HTTP requests, and
- * one raster fetch serving sixteen nodes. **Changing this invalidates every archive already baked.**
+ * A 64² node adapts to the error field four times more finely, which is the better shape for a
+ * scene refining against a moving camera - but only if the traversal can afford to walk the tree it
+ * produces. Against a published `@luma.gl/splats` it cannot: every page the residency budget refuses
+ * re-runs the whole traversal, so a frontier the budget cannot finish refining costs `4 x frontier`
+ * tree walks per drawn frame. Both halves of that scale with the node count, so quartering it is a
+ * sixteenfold cut. At 64² this scene ran at 0.8 fps; at 128² it holds 100+ fps on the same camera
+ * with the same finest splat spacing. The luma.gl branch this example can build against no longer
+ * re-walks per refusal, so retrying 64² there is worth doing - with a frame timer, not an argument.
+ *
+ * The invariant holds: 512 / 2² and 256 / 2¹ are both 128.
  */
-export const BAKE_TILING: TerrainTiling = {
+export const TERRAIN_TILING: TerrainTiling = {
   gridSize: 128,
   elevationSourceLevels: 2,
   imagerySourceLevels: 1
 };
 
-/**
- * What the live source streams: the baker's 128 x 128, or 16,384 splats a node.
- *
- * A 64² node adapts to the error field four times more finely, and that is genuinely the better
- * shape for a scene refining against a moving camera - but only if the traversal can afford to walk
- * the tree it produces, and against a published `@luma.gl/splats` it cannot. The traversal requests
- * a page for **every visible node**, which is the frontier plus the four children of each of its
- * tiles, and the residency budget refuses every one of those children the moment it is full. Each
- * refusal settles immediately and re-runs the whole traversal, so a frontier the budget cannot
- * finish refining costs `4 x frontier` full tree walks per drawn frame rather than one.
- *
- * Both halves of that product scale with the node count, so quartering it is a sixteenfold cut. At
- * 64² this scene walked ~1,300 visible nodes ~1,000 times a frame and ran at 0.8 fps; at 128² it
- * walks ~280 and holds 100+ fps on the same camera, with the same 6.6 m finest splat spacing and the
- * same ground covered. What is actually given up is the finer adaptivity above - visible as a softer
- * near field - and it is given up because the alternative is a scene that does not animate.
- *
- * Raising `maxResidentSplats` until the budget stops refusing is the better answer on paper, and it
- * is now partly available: `splat-device.ts` asks the adapter for a 512 MiB storage binding instead
- * of the 128 MiB a WebGPU device is given by default, which moves the ceiling from about 2.1M splats
- * to about 8.6M, and the default budget from 1.6M to 3.2M. Refusals on this scene fall from ~28,000
- * a frame to ~22,000 at 3.2M and ~5,000 at 6.4M.
- *
- * It is not a licence to go back to 64² without measuring. The rejection storm scales with the node
- * count on both sides, and a frontier that still does not fit is still `4 x frontier` tree walks per
- * frame; what changed is how often it does not fit. Retrying 64² against the raised budget is worth
- * doing, and worth doing with a frame timer rather than an argument.
- *
- * The invariant still holds: 512 / 2² and 256 / 2¹ are both 128.
- */
-export const LIVE_TILING: TerrainTiling = {
-  gridSize: 128,
-  elevationSourceLevels: 2,
-  imagerySourceLevels: 1
-};
-
-/** The baker's node size, kept as a named export because the archive format depends on it. */
-export const NODE_GRID_SIZE = BAKE_TILING.gridSize;
-
-/** Zoom levels between a splat node and the elevation tile it is cut from, when baking. */
-export const ELEVATION_SOURCE_LEVELS = BAKE_TILING.elevationSourceLevels;
-/** Zoom levels between a splat node and the imagery tile it is cut from, when baking. */
-export const IMAGERY_SOURCE_LEVELS = BAKE_TILING.imagerySourceLevels;
+/** Splats along one edge of a node. */
+export const NODE_GRID_SIZE = TERRAIN_TILING.gridSize;
 
 /** Checks a tiling against the one-pixel-per-splat invariant. */
 export function assertTilingIsExact(tiling: TerrainTiling): void {
@@ -158,8 +124,8 @@ export function latitudeToTileY(latitude: number, zoom: number): number {
  * Projects longitude and latitude into deck.gl's common space.
  *
  * The same Web Mercator the `Viewport` uses, reimplemented here rather than imported, so the
- * baker stays a plain Node script with no deck.gl runtime dependency. Only *differences* of
- * these values are ever published, so the shared constant factor cancels either way.
+ * tile workers carry no deck.gl runtime dependency. Only *differences* of these values are ever
+ * used, so the shared constant factor cancels either way.
  */
 export function projectFlat(longitude: number, latitude: number): [number, number] {
   const lambda = (longitude * Math.PI) / 180;
@@ -175,8 +141,8 @@ export function projectFlat(longitude: number, latitude: number): [number, numbe
  *
  * Web Mercator stretches with latitude, so this is the factor that turns a real metre into the
  * space the renderer works in. The layer applies the same conversion at draw time using the
- * viewport's own scales; publishing positions already divided by this value at the archive's
- * origin is what makes the two agree.
+ * viewport's own scales; building positions already divided by this value at the scene's origin
+ * is what makes the two agree.
  */
 export function unitsPerMeter(latitude: number): number {
   return COMMON_WORLD_SIZE / (DECK_EARTH_CIRCUMFERENCE * Math.cos((latitude * Math.PI) / 180));
@@ -221,14 +187,14 @@ export function getSourceBlock(
 
 export function getElevationBlock(
   node: TileAddress,
-  tiling: TerrainTiling = BAKE_TILING
+  tiling: TerrainTiling = TERRAIN_TILING
 ): SourceBlock {
   return getSourceBlock(node, tiling.elevationSourceLevels, ELEVATION_TILE_SIZE);
 }
 
 export function getImageryBlock(
   node: TileAddress,
-  tiling: TerrainTiling = BAKE_TILING
+  tiling: TerrainTiling = TERRAIN_TILING
 ): SourceBlock {
   return getSourceBlock(node, tiling.imagerySourceLevels, IMAGERY_TILE_SIZE);
 }
