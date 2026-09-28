@@ -5,6 +5,7 @@
 import type {CanvasContext, Device, PresentationContext} from '@luma.gl/core';
 import {Framebuffer} from '@luma.gl/core';
 import debug from '../debug/index';
+import ComputeLayersPass from '../passes/compute-layers-pass';
 import DrawLayersPass from '../passes/draw-layers-pass';
 import PickLayersPass from '../passes/pick-layers-pass';
 import type {RenderStats} from '../passes/layers-pass';
@@ -25,6 +26,7 @@ export default class DeckRenderer {
   drawPickingColors: boolean;
   drawLayersPass: DrawLayersPass;
   pickLayersPass: PickLayersPass;
+  computeLayersPass: ComputeLayersPass;
   stats?: Stats;
 
   private renderCount: number;
@@ -39,6 +41,7 @@ export default class DeckRenderer {
     this.drawPickingColors = false;
     this.drawLayersPass = new DrawLayersPass(device);
     this.pickLayersPass = new PickLayersPass(device);
+    this.computeLayersPass = new ComputeLayersPass(device, {id: 'compute-layers-pass'});
     this.renderCount = 0;
     this._needsRedraw = 'Initial render';
     this.renderBuffers = [];
@@ -72,9 +75,15 @@ export default class DeckRenderer {
   }) {
     const layerPass = this.drawPickingColors ? this.pickLayersPass : this.drawLayersPass;
 
+    // Compute runs on deck.gl's own encoder immediately before each viewport's render pass, so a
+    // layer that computes what it draws never submits separately or synchronizes by hand, and a
+    // multi-view frame gets one result per camera rather than the last camera's for all of them.
+    this.computeLayersPass.beginFrame();
+
     const renderOpts: LayersPassRenderOptions = {
       layerFilter: this.layerFilter,
       isPicking: this.drawPickingColors,
+      computePass: this.computeLayersPass,
       ...opts
     };
 

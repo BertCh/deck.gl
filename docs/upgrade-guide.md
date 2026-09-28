@@ -56,6 +56,24 @@ In rare cases, custom WebGL layer shaders may need an update if they explicitly 
 
 Pattern atlas orientation previously aligned with the orientation of common space (bottom-left origin for most viewports), result in vertically flipped patterns from the supplied image. They now align with the screen space.
 
+### Layer compute stage
+
+`Layer` gained two members that participate in the render loop, and a custom layer that already
+defines either name will now be called by deck.gl at a point it does not expect:
+
+- `needsComputePass` — a getter returning `false` by default. Return `true` to opt a layer into the
+  new compute stage.
+- `compute(params)` — called once per viewport, immediately before that viewport's render pass, for
+  layers that opt in. See [Layer](./api-reference/core/layer.md#compute).
+
+Rename any conflicting member on your layer subclass. A layer that does not define either name is
+unaffected, because `needsComputePass` is `false` for every existing layer and the stage is skipped.
+
+`LayersPassRenderOptions` gained an optional `computePass` field. Code that constructs render
+options by hand and calls `LayersPass.render()` directly keeps working — omitting the field skips
+the compute stage — but a custom `LayersPass` subclass that overrides `_render()` and does not
+forward `options.computePass` will silently drop compute work for any layer that opts in.
+
 ## Upgrading to v9.3
 
 Upgraded dependencies to [luma.gl v9.3](https://luma.gl/docs/upgrade-guide) and [loaders.gl v4.4](https://loaders.gl/docs/upgrade-guide). Your app may be affected if it contains custom layers.

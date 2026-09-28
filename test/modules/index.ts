@@ -12,6 +12,7 @@ import './mesh-layers';
 import './geo-layers';
 import './aggregation-layers';
 import './extensions';
+import './splat-layers';
 
 // Integration
 import './carto';

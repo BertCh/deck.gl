@@ -132,6 +132,16 @@
       },
       {
         "type": "category",
+        "label": "Gaussian Splat Layers",
+        "items": [
+          "api-reference/splat-layers/overview",
+          "api-reference/splat-layers/splat-layer",
+          "api-reference/splat-layers/splat-clip-extension",
+          "api-reference/splat-layers/splat-device-budgets"
+        ]
+      },
+      {
+        "type": "category",
         "label": "Aggregation Layers",
         "items": [
           "api-reference/aggregation-layers/overview",

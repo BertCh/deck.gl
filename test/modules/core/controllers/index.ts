@@ -4,4 +4,5 @@
 
 import './controllers.spec';
 import './custom-controller.spec';
+import './terrain-controller.spec';
 import './view-states.spec';

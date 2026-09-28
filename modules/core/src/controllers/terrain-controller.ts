@@ -5,21 +5,66 @@
 import MapController from './map-controller';
 import {MapState, MapStateProps} from './map-controller';
 import type {ControllerProps, InteractionState} from './controller';
-import type {MjolnirGestureEvent, MjolnirWheelEvent} from 'mjolnir.js';
+import type Viewport from '../viewports/viewport';
+import type {Timeline} from '@luma.gl/engine';
+
+/** How often the terrain under the viewport center is sampled, in milliseconds. */
+const PICK_INTERVAL = 500;
+
+/** Time constant of the filter that carries the baseline to a new sample, in milliseconds. */
+const ALTITUDE_TIME_CONSTANT = 350;
+
+/**
+ * Ceiling on how fast a baseline change is allowed to slide the scene across the screen, in
+ * pixels per second.
+ *
+ * Moving the baseline translates the camera vertically, and at a shallow pitch one meter of
+ * baseline is worth nearly half a pixel, so an unbounded step reads as a jump rather than as
+ * camera motion. Capping the *visual* speed rather than the altitude rate keeps the bound
+ * meaningful at every zoom level.
+ */
+const MAX_BASELINE_PIXELS_PER_SECOND = 300;
+
+/**
+ * How far a sample may be from the accepted target before it has to be confirmed, in meters.
+ *
+ * A step this large is as likely to be a terrain tile refining under the sample point, or the
+ * center ray crossing a cliff edge onto something far behind it, as it is a real move.
+ */
+const CONFIRM_STEP_METERS = 20;
+
+/** The baseline counts as settled once it is within this many pixels of its target. */
+const SETTLED_PIXELS = 0.05;
+
+/** Longest frame interval the filter integrates over, in milliseconds. */
+const MAX_FRAME_INTERVAL = 100;
 
 /**
  * Controller that extends MapController with terrain-aware behavior.
  * The camera smoothly follows terrain elevation during pan/zoom.
+ *
+ * The elevation under the viewport center is sampled from the depth of a `pickable: '3d'` layer
+ * and written into the view state as `position[2]`, so zoom, pitch and rotation are all measured
+ * against the surface instead of the sea-level plane.
  */
 export default class TerrainController extends MapController {
-  /** Cached terrain altitude from depth picking at viewport center (smoothed) */
+  /** Camera altitude baseline currently written into the view state, in meters. */
   private _terrainAltitude?: number = undefined;
-  /** Raw (unsmoothed) terrain altitude from latest pick */
+  /** Terrain elevation most recently accepted from picking, in meters. */
   private _terrainAltitudeTarget?: number = undefined;
-  /** rAF handle for periodic terrain altitude picking */
-  private _pickFrameId: number | null = null;
-  /** Timestamp of last pick */
-  private _lastPickTime: number = 0;
+  /** A large sample held back until a second sample confirms it, in meters. */
+  private _terrainAltitudeCandidate?: number = undefined;
+  /** deck's animation-loop timeline, used as the clock for sampling and filtering. */
+  private _timeline: Timeline;
+  /** Timeline time of the last pick. */
+  private _lastPickTime: number = -Infinity;
+  /** Timeline time of the last frame, or `undefined` before the first one. */
+  private _lastFrameTime?: number = undefined;
+
+  constructor(opts: ConstructorParameters<typeof MapController>[0]) {
+    super(opts);
+    this._timeline = opts.timeline;
+  }
 
   setProps(
     props: ControllerProps &
@@ -29,51 +74,31 @@ export default class TerrainController extends MapController {
       }
   ) {
     super.setProps({rotationPivot: '3d', ...props});
-
-    // Periodically pick terrain altitude at the viewport center using rAF.
-    // Keeps the altitude cache warm so interactions don't need expensive
-    // synchronous GPU readbacks. rAF naturally pauses when tab is backgrounded.
-    if (this._pickFrameId === null) {
-      const loop = () => {
-        const now = Date.now();
-        if (now - this._lastPickTime > 500 && !this.isDragging()) {
-          this._lastPickTime = now;
-          this._pickTerrainCenterAltitude();
-          // On first successful pick, rebase viewport to terrain altitude.
-          // Runs from rAF (outside React render) so onViewStateChange won't loop.
-          if (this._terrainAltitude === undefined && this._terrainAltitudeTarget !== undefined) {
-            this._terrainAltitude = this._terrainAltitudeTarget;
-            const controllerState = new this.ControllerState({
-              makeViewport: this.makeViewport,
-              ...this.props,
-              ...this.state
-            } as any);
-            const rebaseProps = this._rebaseViewport(this._terrainAltitudeTarget, controllerState);
-            if (rebaseProps) {
-              // Build a controllerState that includes the rebase adjustments so
-              // internal state matches the rebased viewState after React round-trip.
-              const rebasedState = new this.ControllerState({
-                makeViewport: this.makeViewport,
-                ...this.props,
-                ...this.state,
-                ...rebaseProps
-              } as any);
-              super.updateViewport(rebasedState);
-            }
-          }
-        }
-        this._pickFrameId = requestAnimationFrame(loop);
-      };
-      this._pickFrameId = requestAnimationFrame(loop);
-    }
   }
 
-  finalize() {
-    if (this._pickFrameId !== null) {
-      cancelAnimationFrame(this._pickFrameId);
-      this._pickFrameId = null;
+  /**
+   * Samples the terrain and advances the baseline toward it.
+   *
+   * deck calls this once per rendered frame, which is what keeps the baseline honest: it tracks
+   * the terrain whether or not the user is interacting, so a gesture never has to absorb an
+   * accumulated correction, and the filter runs on elapsed time rather than on how many events
+   * a gesture happened to produce.
+   */
+  updateTransition(): void {
+    super.updateTransition();
+
+    const time = this._timeline.getTime();
+    const interval =
+      this._lastFrameTime === undefined
+        ? 0
+        : Math.min(Math.max(time - this._lastFrameTime, 0), MAX_FRAME_INTERVAL);
+    this._lastFrameTime = time;
+
+    if (time - this._lastPickTime >= PICK_INTERVAL && !this.isDragging()) {
+      this._lastPickTime = time;
+      this._sampleTerrainAltitude();
     }
-    super.finalize();
+    this._advanceTerrainAltitude(interval);
   }
 
   protected updateViewport(
@@ -87,52 +112,138 @@ export default class TerrainController extends MapController {
       return;
     }
 
-    // Smoothly blend toward target altitude
-    const SMOOTHING = 0.05;
-    this._terrainAltitude += (this._terrainAltitudeTarget! - this._terrainAltitude) * SMOOTHING;
-
-    const viewportProps = newControllerState.getViewportProps();
-    const pos = viewportProps.position || [0, 0, 0];
-    extraProps = {
-      ...extraProps,
-      position: [pos[0], pos[1], this._terrainAltitude]
-    };
-
-    super.updateViewport(newControllerState, extraProps, interactionState);
+    const {position = [0, 0, 0]} = newControllerState.getViewportProps();
+    super.updateViewport(
+      newControllerState,
+      {...extraProps, position: [position[0], position[1], this._terrainAltitude]},
+      interactionState
+    );
   }
 
-  private _pickTerrainCenterAltitude(): void {
+  /** Reads the terrain elevation under the viewport center into the target. */
+  private _sampleTerrainAltitude(): void {
     if (!this.pickPosition) {
       return;
     }
     const {x, y, width, height} = this.props;
-    const pickResult = this.pickPosition(x + width / 2, y + height / 2);
-    if (pickResult?.coordinate && pickResult.coordinate.length >= 3) {
-      this._terrainAltitudeTarget = pickResult.coordinate[2];
+    const coordinate = this.pickPosition(x + width / 2, y + height / 2)?.coordinate;
+    if (!coordinate || coordinate.length < 3) {
+      // Nothing under the center: sky above the horizon, or a tile that has not arrived. Hold
+      // the target rather than inventing one.
+      this._terrainAltitudeCandidate = undefined;
+      return;
+    }
+
+    const altitude = coordinate[2];
+    if (
+      this._terrainAltitudeTarget === undefined ||
+      Math.abs(altitude - this._terrainAltitudeTarget) <= CONFIRM_STEP_METERS
+    ) {
+      this._terrainAltitudeTarget = altitude;
+      this._terrainAltitudeCandidate = undefined;
+    } else if (
+      this._terrainAltitudeCandidate !== undefined &&
+      Math.abs(altitude - this._terrainAltitudeCandidate) <= CONFIRM_STEP_METERS
+    ) {
+      // Two samples agree on somewhere new, so it is the terrain that moved, not the pick.
+      this._terrainAltitudeTarget = altitude;
+      this._terrainAltitudeCandidate = undefined;
+    } else {
+      this._terrainAltitudeCandidate = altitude;
     }
   }
 
+  /** Moves the applied baseline toward the target and publishes the result. */
+  private _advanceTerrainAltitude(interval: number): void {
+    const target = this._terrainAltitudeTarget;
+    if (target === undefined) {
+      return;
+    }
+
+    if (this._terrainAltitude === undefined) {
+      // First fix on the terrain. Adopting it must not move the camera, so the shift is paid for
+      // with the zoom and center that reproduce the view the app asked for.
+      const initialState = this._getControllerState();
+      const rebaseProps = this._rebaseViewport(target, initialState);
+      if (rebaseProps) {
+        this._terrainAltitude = target;
+        super.updateViewport(this._getControllerState(rebaseProps));
+        return;
+      }
+      // The camera sits below the terrain the app pointed it at, so no zoom reproduces this view
+      // from the new baseline. Start from the baseline already in the view state and let the
+      // filter below carry the camera up at a speed that reads as motion.
+      this._terrainAltitude = initialState.getViewportProps().position?.[2] ?? 0;
+    }
+
+    const delta = target - this._terrainAltitude;
+    if (delta === 0 || interval <= 0) {
+      return;
+    }
+    // A transition owns `position` while it runs; stepping the baseline underneath it would
+    // fight the interpolator.
+    if (this.transitionManager.getViewportInTransition()) {
+      return;
+    }
+
+    const controllerState = this._getControllerState();
+    const viewportProps = controllerState.getViewportProps();
+    const pixelsPerMeter = getPixelsPerMeter(this.makeViewport(viewportProps));
+
+    const settled = SETTLED_PIXELS / pixelsPerMeter;
+    if (Math.abs(delta) <= settled) {
+      this._terrainAltitude = target;
+    } else {
+      const eased = delta * (1 - Math.exp(-interval / ALTITUDE_TIME_CONSTANT));
+      const ceiling = ((MAX_BASELINE_PIXELS_PER_SECOND / pixelsPerMeter) * interval) / 1000;
+      this._terrainAltitude += Math.sign(delta) * Math.min(Math.abs(eased), ceiling);
+    }
+
+    // A drag publishes the baseline itself on its own event, with the interaction state that
+    // belongs to it.
+    if (this.isDragging()) {
+      return;
+    }
+    const {position = [0, 0, 0]} = viewportProps;
+    super.updateViewport(controllerState, {
+      position: [position[0], position[1], this._terrainAltitude],
+      transitionDuration: 0
+    });
+  }
+
+  /** Builds a controller state from the current props, optionally overridden. */
+  private _getControllerState(extraProps?: Record<string, any>): MapState {
+    return new this.ControllerState({
+      makeViewport: this.makeViewport,
+      ...this.props,
+      ...this.state,
+      ...extraProps
+    } as any);
+  }
+
   /**
-   * Compute viewport adjustments to keep the view visually the same
-   * when shifting position to [0, 0, altitude].
+   * Computes viewport adjustments that keep the view visually the same
+   * when shifting the camera baseline to `altitude`.
    */
   private _rebaseViewport(
     altitude: number,
     newControllerState: MapState
   ): Record<string, any> | null {
     const viewportProps = newControllerState.getViewportProps();
-    const oldViewport = this.makeViewport({...viewportProps, position: [0, 0, 0]});
-    const oldCameraPos = oldViewport.cameraPosition;
+    const oldViewport = this.makeViewport(viewportProps);
+    const unitsPerMeterZ = oldViewport.distanceScales.unitsPerMeter[2];
 
-    const centerZOffset = altitude * oldViewport.distanceScales.unitsPerMeter[2];
-    const cameraHeightAboveOldCenter = oldCameraPos[2];
-    const newCameraHeightAboveCenter = cameraHeightAboveOldCenter - centerZOffset;
-    if (newCameraHeightAboveCenter <= 0) {
+    const currentCenterZ = (viewportProps.position?.[2] ?? 0) * unitsPerMeterZ;
+    const cameraHeightAboveCenter = oldViewport.cameraPosition[2] - currentCenterZ;
+    const newCameraHeightAboveCenter = oldViewport.cameraPosition[2] - altitude * unitsPerMeterZ;
+    if (cameraHeightAboveCenter <= 0 || newCameraHeightAboveCenter <= 0) {
       return null;
     }
 
-    const zoomDelta = Math.log2(cameraHeightAboveOldCenter / newCameraHeightAboveCenter);
-    const newZoom = viewportProps.zoom + zoomDelta;
+    // Camera distance is proportional to 2^-zoom, so trading the baseline against the zoom leaves
+    // the camera where it is.
+    const newZoom =
+      viewportProps.zoom + Math.log2(cameraHeightAboveCenter / newCameraHeightAboveCenter);
 
     const newViewport = this.makeViewport({
       ...viewportProps,
@@ -152,4 +263,15 @@ export default class TerrainController extends MapController {
     }
     return null;
   }
+}
+
+/**
+ * Pixels the scene travels for one meter of baseline change.
+ *
+ * The baseline translates the camera vertically, so this is the vertical common-space scale:
+ * common units per meter times pixels per common unit.
+ */
+function getPixelsPerMeter(viewport: Viewport): number {
+  const pixelsPerMeter = viewport.distanceScales.unitsPerMeter[2] * viewport.scale;
+  return pixelsPerMeter > 0 ? pixelsPerMeter : 1;
 }

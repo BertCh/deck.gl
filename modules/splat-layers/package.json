@@ -1,0 +1,56 @@
+{
+  "name": "@deck.gl/splat-layers",
+  "description": "deck.gl layers that render 3D Gaussian splat scenes",
+  "license": "MIT",
+  "type": "module",
+  "version": "9.4.0-beta.4",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "webgpu",
+    "webgl",
+    "visualization",
+    "gaussian splat",
+    "3dgs",
+    "radiance field",
+    "layer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/visgl/deck.gl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/visgl/deck.gl/issues"
+  },
+  "homepage": "https://deck.gl",
+  "types": "dist/index.d.ts",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "dist.min.js"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build-bundle": "ocular-bundle ./bundle.ts",
+    "prepublishOnly": "npm run build-bundle && npm run build-bundle -- --env=dev"
+  },
+  "dependencies": {
+    "@luma.gl/splats": "^9.4.0",
+    "@math.gl/core": "^4.1.0"
+  },
+  "peerDependencies": {
+    "@deck.gl/core": "~9.4.0",
+    "@luma.gl/core": "~9.4.0",
+    "@luma.gl/engine": "~9.4.0"
+  }
+}

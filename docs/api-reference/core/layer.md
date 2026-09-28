@@ -785,6 +785,48 @@ Parameters:
 
 The default implementation looks for a variable `model` in the layer's state (which is expected to be an instance of the luma.gl `Model` class) and calls `draw` on that model with the parameters.
 
+#### `compute` {#compute}
+
+Records GPU compute work for this frame, before any render pass opens.
+
+A layer that computes what it is about to draw — a GPU-driven aggregation, a sort, a culling pass —
+cannot do that inside `draw`, because a compute pass and a render pass cannot be open on the same
+command encoder at once. Without somewhere to put it, such a layer has to open an encoder of its own
+and submit it separately, which costs an extra submission per layer per frame and gives up the
+ordering guarantee that makes the result usable.
+
+`compute({commandEncoder, viewport, pass, isPicking})`
+
+Parameters:
+
+* `commandEncoder` (`CommandEncoder`) - deck.gl's own encoder, submitted together with the render
+  pass that immediately follows. Nothing recorded here needs a separate submission or a fence.
+* `viewport` ([Viewport](./viewport.md)) - the viewport the layer is about to be drawn with.
+* `pass` (string) - name of the render pass that follows, for example `'screen'` or `'picking'`.
+* `isPicking` (boolean) - whether that pass renders picking colors.
+
+Only called on layers whose `needsComputePass` getter returns `true`, and called **once per
+viewport**, interleaved with the render passes rather than batched ahead of them. That matters as
+soon as there is more than one view: what a layer computes is camera-dependent, so computing every
+viewport up front would leave every view drawing the last one's result.
+
+```js
+class MyLayer extends Layer {
+  get needsComputePass() {
+    return true;
+  }
+
+  compute({commandEncoder, viewport}) {
+    const computePass = commandEncoder.beginComputePass();
+    // ...record work the following draw will consume
+    computePass.end();
+  }
+}
+```
+
+[Layer extensions](../../developer-guide/custom-layers/layer-extensions.md) have a matching `compute` hook, which runs before the layer's
+own — but only on layers that already declare a compute stage.
+
 #### `getPickingInfo` {#getpickinginfo}
 
 Called when a layer is being hovered or clicked, before any user callbacks are called. The layer can override or add additional fields to the `info` object that will be passed to the callbacks.

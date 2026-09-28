@@ -14,6 +14,7 @@ import type {Framebuffer, RenderPass} from '@luma.gl/core';
 import type {NumberArray4} from '@math.gl/core';
 
 import Pass from './pass';
+import type ComputeLayersPass from './compute-layers-pass';
 import type Viewport from '../viewports/viewport';
 import type View from '../views/view';
 import type Layer from '../lib/layer';
@@ -58,6 +59,14 @@ export type LayersPassRenderOptions = {
   shaderModuleProps?: any;
   /** Stores returned results from Effect.preRender, for use downstream in the render pipeline */
   preRenderStats?: Record<string, any>;
+  /**
+   * Records layer compute work into deck.gl's encoder before each viewport's render pass opens.
+   *
+   * Interleaved with the render passes rather than batched ahead of them, because what a layer
+   * computes is camera-dependent: computing every viewport up front would leave every view drawing
+   * the last one's result.
+   */
+  computePass?: ComputeLayersPass | null;
 };
 
 export type DrawLayerParameters = {
@@ -147,6 +156,15 @@ export default class LayersPass extends Pass {
           : [subViewports];
 
         for (const renderGroup of renderGroups) {
+          for (const subViewport of renderGroup) {
+            options.computePass?.computeViewport(subViewport, {
+              pass,
+              layers: options.layers,
+              isPicking: options.isPicking,
+              layerFilter: options.layerFilter
+            });
+          }
+
           const renderPass = this.device.beginRenderPass({
             framebuffer,
             parameters,

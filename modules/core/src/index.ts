@@ -25,6 +25,8 @@ export {default as PostProcessEffect} from './effects/post-process-effect';
 // Passes
 export {default as _LayersPass} from './passes/layers-pass';
 export {default as _PickLayersPass} from './passes/pick-layers-pass';
+export {default as _ComputeLayersPass} from './passes/compute-layers-pass';
+export type {LayerComputeParameters} from './passes/compute-layers-pass';
 
 // Experimental Pure JS (non-React) bindings
 export {default as Deck} from './lib/deck';

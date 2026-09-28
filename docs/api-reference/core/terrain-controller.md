@@ -19,6 +19,17 @@ new Tile3DLayer({
 
 Without a `pickable: '3d'` layer, the controller has no elevation data and will behave like a standard `MapController`.
 
+## Behavior
+
+The elevation under the viewport center is sampled a couple of times a second and written into the view state as `position[2]`, the camera's altitude baseline. Zoom, pitch and rotation are all measured against that baseline, so zooming approaches the surface rather than the sea-level plane and the camera rides over relief instead of through it.
+
+Two things keep the baseline from showing up as camera motion of its own:
+
+- The first fix is adopted without moving the camera. The baseline is traded against `zoom` and the view center, which reproduces the view the app asked for from the new reference altitude — so `zoom` after the first sample is normally higher than the `zoom` in `initialViewState`. When the camera starts out below the terrain, no zoom can reproduce the view, and the controller climbs to the surface instead.
+- Later changes move the camera, because following the terrain is the point, but the baseline is filtered on elapsed time and capped at a fixed on-screen speed. A tile refining under the sample point, or the center of the view crossing a cliff edge onto something far behind it, reads as camera motion rather than as a jump. A single outlying sample has to be confirmed by a second one before it is followed at all, and a sample that hits nothing — sky above the horizon, or a tile that has not arrived — leaves the baseline where it is.
+
+The baseline tracks the terrain on every rendered frame rather than only while the user is interacting, so a gesture never has to absorb an accumulated correction.
+
 ## Usage
 
 Use with the default view:

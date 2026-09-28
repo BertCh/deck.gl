@@ -36,6 +36,7 @@ import type {NumericArray} from '../types/types';
 import type {DefaultProps} from '../lifecycle/prop-types';
 import type {LayerData, LayerProps} from '../types/layer-props';
 import type {LayerContext} from './layer-manager';
+import type {LayerComputeParameters} from '../passes/compute-layers-pass';
 import type {BinaryAttribute} from './attribute/attribute';
 import {RenderPass} from '@luma.gl/core';
 import {PickingProps} from '@luma.gl/shadertools';
@@ -298,6 +299,19 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
     return true;
   }
 
+  /**
+   * `true` if this layer records GPU compute work before the render pass opens.
+   *
+   * A layer that computes what it is about to draw - a GPU-driven aggregation, a sort, a culling
+   * pass - cannot do that inside {@link Layer.draw}, because a compute pass and a render pass
+   * cannot be open on the same encoder at once. Declaring this makes deck.gl call
+   * {@link Layer.compute} on its own encoder first, so the result is visible to the draw that
+   * follows without a second submission.
+   */
+  get needsComputePass(): boolean {
+    return false;
+  }
+
   /** Updates selected state members and marks the layer for redraw */
   setState(partialState: any): void {
     this.setChangeFlags({stateChanged: true});
@@ -551,6 +565,16 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
       model.draw(opts.renderPass);
     }
   }
+
+  /**
+   * Records GPU compute work for this frame, before any render pass opens.
+   *
+   * Only called on layers whose {@link Layer.needsComputePass} is `true`, once per viewport the
+   * layer is visible in. The encoder is deck.gl's own and is submitted together with this frame's
+   * render passes, so nothing recorded here needs an explicit submission or a fence.
+   */
+  /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
+  compute(params: LayerComputeParameters): void {}
 
   // called to populate the info object that is passed to the event handler
   // @return null to cancel event
@@ -1119,6 +1143,14 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
     }
   }
 
+  /** Runs this layer's compute stage, giving extensions a chance first. */
+  _computeLayer(params: LayerComputeParameters): void {
+    for (const extension of this.props.extensions) {
+      extension.compute.call(this, params, extension);
+    }
+    this.compute(params);
+  }
+
   // Calculates uniforms
   _drawLayer({
     renderPass,
@@ -1239,9 +1271,9 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
     // Update composite flags
     const propsOrDataChanged = Boolean(
       changeFlags.dataChanged ||
-        changeFlags.updateTriggersChanged ||
-        changeFlags.propsChanged ||
-        changeFlags.extensionsChanged
+      changeFlags.updateTriggersChanged ||
+      changeFlags.propsChanged ||
+      changeFlags.extensionsChanged
     );
     changeFlags.propsOrDataChanged = propsOrDataChanged;
     changeFlags.somethingChanged =

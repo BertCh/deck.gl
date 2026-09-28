@@ -10,6 +10,48 @@ deck.gl v9.4 is expected to be the final release in the v9 series. It brings tog
 
 Looking ahead, deck.gl v10 is expected to introduce larger architectural changes, including luma.gl v10, loaders.gl v5, and support for more advanced binary data pipelines and GPU rendering techniques. As a result, v10 will likely be a more substantial and intentional upgrade for applications than this release.
 
+### Gaussian splats
+
+A new module, [`@deck.gl/splat-layers`](./api-reference/splat-layers/overview.md), renders 3D
+Gaussian splat scenes as deck.gl layers, composited into the same render pass as the rest of the
+layer stack rather than into an overlaid canvas. Opaque geometry drawn by earlier layers occludes
+splats behind it, because they share a depth buffer, and the splats participate in deck.gl's
+picking, hover and tooltip machinery.
+
+On WebGPU the projection, culling, global depth sort, spherical-harmonic radiance and indirect draw
+all run as GPU compute over the source buffers. [`SplatClipExtension`](./api-reference/splat-layers/splat-clip-extension.md)
+masks a scene to a half-space, slab or prism with a boundary that follows each Gaussian's own extent
+rather than its center. Residency is bounded by a [device-class budget](./api-reference/splat-layers/splat-device-budgets.md)
+rather than by a number that only holds on the machine it was tuned on.
+
+Streaming scenes refine without popping. The traversal already kept a coarse parent on screen until
+its children were resident, so a refinement never opened a hole — but it crossed that boundary in a
+single frame, and under a moving camera that snap happens somewhere on screen several times a second.
+An arriving page now ramps up, and the page it replaces is *held* at the opacity it had until the ramp
+finishes rather than cross-dissolved against it, which would drop coverage to 75% across every patch
+changing level at once. See
+[`fadeInDuration`](./api-reference/splat-layers/splat-layer.md#fadeinduration).
+
+`splatHierarchy` also accepts a tree that **grows**. An archive knows its whole tree from its
+manifest; a tile service has no bottom until a request 404s, so a source can now discover nodes as
+the camera asks for them and tell the layer through `subscribe`. The traversal re-indexes in place
+and every page already resident survives it.
+
+The module is not bundled into the `deck.gl` umbrella package: splat rendering is WebGPU-first and
+carries `@luma.gl/splats` as a dependency, so it is installed deliberately.
+
+### A compute stage in the layer lifecycle
+
+Layers can now record GPU compute work before the render pass opens, through a
+[`compute`](./api-reference/core/layer.md#compute) method paired with a `needsComputePass` getter.
+It runs on deck.gl's own command encoder, immediately before the render pass that consumes the
+result, so a layer that computes what it draws no longer has to open an encoder of its own and
+submit it separately. The stage runs once per viewport, interleaved with the render passes, so a
+multi-view frame gets one result per camera rather than the last camera's for all of them.
+
+This is not splat-specific: any GPU-driven layer — an aggregation that bins on the GPU, a culling
+pass, a sort — wants the same thing. `LayerExtension` gained a matching `compute` hook.
+
 ### WebGPU
 
 deck.gl v9.4 substantially expands its experimental WebGPU support. All layers in the official layer catalog now support WebGPU, including [`MVTLayer`](./api-reference/geo-layers/mvt-layer.md), with tile clipping for its circle, path, and polygon sublayers, and [`Tile3DLayer`](./api-reference/geo-layers/tile-3d-layer.md), with support for point-cloud, glTF scenegraph, and I3S mesh tile content. Big improvements are made to core WebGPU attribute-buffer assembly, render pass management, and device switching. Render tests are used to ensure WebGL-WebGPU parity covering most common use cases.

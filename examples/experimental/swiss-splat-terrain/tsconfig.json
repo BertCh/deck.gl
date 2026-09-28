@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    // The bake scripts run under `node --experimental-strip-types`, which requires relative
+    // imports to carry their real `.ts` extension.
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "baseUrl": ".",
+    // Typechecking follows the default, published-package build, where `@deck.gl/splat-layers`
+    // resolves to this folder's copy of the layer. Source mode swaps in the promoted module
+    // through the matching Vite alias.
+    "paths": {
+      // The ramp controller is shared with the promoted module rather than copied; see the
+      // matching Vite alias for why that resolves in both modes.
+      "@deck.gl/splat-layers/fade-controller": [
+        "../../../modules/splat-layers/src/splat-fade-controller.ts"
+      ],
+      "@deck.gl/splat-layers": ["./splat-layer.ts"]
+    }
+  },
+  "include": ["*.ts", "*.tsx", "scripts/**/*.ts"]
+}

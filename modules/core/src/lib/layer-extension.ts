@@ -7,6 +7,7 @@ import type Layer from './layer';
 import type CompositeLayer from './composite-layer';
 import type {UpdateParameters} from './layer';
 import type {LayerContext} from './layer-manager';
+import type {LayerComputeParameters} from '../passes/compute-layers-pass';
 
 export default abstract class LayerExtension<OptionsT = unknown> {
   static defaultProps = {};
@@ -76,6 +77,14 @@ export default abstract class LayerExtension<OptionsT = unknown> {
   }
 
   draw(this: Layer, params: any, extension: this): void {}
+
+  /**
+   * Records GPU compute work before the render pass opens.
+   *
+   * Only called on layers whose `needsComputePass` is `true`, so an extension that wants a compute
+   * stage on an arbitrary layer also has to make that layer declare one.
+   */
+  compute(this: Layer, params: LayerComputeParameters, extension: this): void {}
 
   finalizeState(this: Layer, context: LayerContext, extension: this): void {}
 }
