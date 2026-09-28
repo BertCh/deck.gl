@@ -280,3 +280,33 @@ webglTest('ComponentState#async props with transform', async () => {
   state.finalize();
   expect(image.destroyed, 'Texture is deleted on finalization').toBeTruthy();
 });
+
+webglTest('ComponentState#image prop set back to null', () => {
+  const testContext = {device};
+  const testImage = {data: new Uint8ClampedArray([0, 0, 0, 255]), width: 1, height: 1};
+
+  // @ts-expect-error
+  const state = new ComponentState();
+  const makeComponent = (props: Record<string, unknown>) => {
+    const comp = new TestComponent(props);
+    // @ts-expect-error
+    comp.internalState = state;
+    // @ts-expect-error
+    comp.context = testContext;
+    state.component = comp;
+    state.setAsyncProps(comp.props);
+    return comp;
+  };
+
+  const image = makeComponent({image: testImage}).props.image;
+  expect(image.handle, 'the image is transformed into a texture').toBeTruthy();
+
+  const component = makeComponent({image: null});
+  expect(image.destroyed, 'the texture it replaced is released').toBeTruthy();
+  expect(
+    component.props.image,
+    'and the prop resolves to nothing rather than to the released texture'
+  ).toBe(null);
+
+  state.finalize();
+});

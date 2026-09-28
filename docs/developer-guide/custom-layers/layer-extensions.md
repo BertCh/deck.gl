@@ -175,6 +175,25 @@ Arguments:
 * `extension` - the source extension instance.
 
 
+##### `compute` {#compute}
+
+Called before the layer's own [`compute`](../../api-reference/core/layer.md#compute), immediately
+before the render pass that draws the layer opens, once per physical viewport.
+
+When this method is executed, `this` points to the layer.
+
+Arguments:
+
+* `params` - same object passed to `layer.compute`: `commandEncoder`, `viewport`, `pass` and
+  `isPicking`.
+* `extension` - the source extension instance.
+
+Defining this hook opts the layer into the compute stage: the default
+[`needsComputePass`](../../api-reference/core/layer.md#needscomputepass) returns `true` for any
+layer with an extension that defines `compute`. It is not called before picking passes. On WebGL the
+encoder cannot open compute passes, so check `this.context.device.type` first.
+
+
 ##### `finalizeState` {#finalizestate}
 
 Called after the layer's own `finalizeState`.

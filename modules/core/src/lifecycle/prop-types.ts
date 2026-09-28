@@ -218,7 +218,9 @@ const TYPE_DEFINITIONS = {
   image: {
     transform: (value, propType: ImagePropType, component) => {
       const context = (component as Layer).context;
-      if (!context || !context.device) {
+      // An image prop set back to nothing resolves to nothing. `release` has already destroyed the
+      // previous texture by now, so throwing here would leave the layer holding it.
+      if (!value || !context || !context.device) {
         return null;
       }
       return createTexture(component.id, context.device, value, {

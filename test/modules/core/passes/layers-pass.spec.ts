@@ -8,6 +8,8 @@ import {Layer, CompositeLayer, LayerManager, Viewport, MapView} from '@deck.gl/c
 import {layerIndexResolver} from '@deck.gl/core/passes/layers-pass';
 import DrawLayersPass from '@deck.gl/core/passes/draw-layers-pass';
 import PickLayersPass from '@deck.gl/core/passes/pick-layers-pass';
+import ComputeLayersPass from '@deck.gl/core/passes/compute-layers-pass';
+import type {LayerComputeParameters} from '@deck.gl/core/passes/compute-layers-pass';
 import {ScatterplotLayer} from '@deck.gl/layers';
 import {device} from '@deck.gl/test-utils/vitest';
 import {Buffer, Texture} from '@luma.gl/core';
@@ -625,4 +627,206 @@ test('LayersPass#GLViewport', () => {
       `${name} sets viewport correctly`
     ).toEqual(expectedGLViewport);
   }
+});
+
+type ComputeEvent = {type: string; layerId?: string; viewportId?: string; encoder?: unknown};
+
+/** Records its compute and draw calls into a shared log. */
+class ComputeRecordingLayer extends Layer<{
+  log: ComputeEvent[];
+  viewportId?: string;
+  throwOnCompute?: boolean;
+}> {
+  static layerName = 'ComputeRecordingLayer';
+
+  initializeState() {}
+
+  get needsComputePass(): boolean {
+    return true;
+  }
+
+  compute({viewport, commandEncoder}: LayerComputeParameters): void {
+    if (this.props.throwOnCompute) {
+      throw new Error('compute failed');
+    }
+    this.props.log.push({
+      type: 'compute',
+      layerId: this.id,
+      viewportId: viewport.id,
+      encoder: commandEncoder
+    });
+  }
+
+  draw() {
+    this.props.log.push({type: 'draw', layerId: this.id, viewportId: this.context.viewport.id});
+  }
+}
+
+/** Renders `ComputeRecordingLayer`s and keeps each one to the viewport named in its props. */
+class ComputeRecordingCompositeLayer extends CompositeLayer<{
+  log: ComputeEvent[];
+  children: {id: string; viewportId?: string}[];
+}> {
+  static layerName = 'ComputeRecordingCompositeLayer';
+
+  filterSubLayer({layer, viewport}) {
+    const {viewportId} = layer.props;
+    return !viewportId || viewportId === viewport.id;
+  }
+
+  renderLayers() {
+    return this.props.children.map(
+      child =>
+        new ComputeRecordingLayer(this.getSubLayerProps({id: child.id}), {
+          ...child,
+          log: this.props.log
+        })
+    );
+  }
+}
+
+/** Renders `layers` through a `DrawLayersPass` with a compute pass, logging render passes. */
+function renderWithCompute(
+  log: ComputeEvent[],
+  layers: Layer[],
+  viewports: Viewport[],
+  options: {layerFilter?: (context: any) => boolean; onError?: (error: Error) => void} = {}
+): number {
+  const layerManager = new LayerManager(device, {viewport: viewports[0]});
+  layerManager.setProps({
+    onError:
+      options.onError ||
+      (error => {
+        throw error;
+      })
+  });
+  layerManager.setLayers(layers);
+  const layersPass = new DrawLayersPass(device);
+  const computePass = new ComputeLayersPass(device, {id: 'compute'});
+  const originalBeginRenderPass = device.beginRenderPass.bind(device);
+  const beginRenderPass = vi.spyOn(device, 'beginRenderPass').mockImplementation(props => {
+    log.push({type: 'renderPass', encoder: device.commandEncoder});
+    return originalBeginRenderPass(props);
+  });
+  try {
+    layersPass.render({
+      pass: 'screen',
+      viewports,
+      layers: layerManager.getLayers(),
+      layerFilter: options.layerFilter,
+      onViewportActive: layerManager.activateViewport,
+      computePass
+    });
+    return beginRenderPass.mock.calls.length;
+  } finally {
+    beginRenderPass.mockRestore();
+    layerManager.finalize();
+  }
+}
+
+test('LayersPass#computes each viewport on the render encoder, right before its render pass', () => {
+  const events: ComputeEvent[] = [];
+  renderWithCompute(
+    events,
+    [new ComputeRecordingLayer({id: 'computing', log: events})],
+    [new Viewport({id: 'A'}), new Viewport({id: 'B'})]
+  );
+
+  expect(
+    events.map(event => `${event.type}${event.viewportId ? `:${event.viewportId}` : ''}`),
+    'compute, render pass, draw - once per viewport, in that order'
+  ).toEqual(['compute:A', 'renderPass', 'draw:A', 'compute:B', 'renderPass', 'draw:B']);
+  expect(events[0].encoder, 'compute records into the encoder the render pass uses').toBe(
+    events[1].encoder
+  );
+  expect(events[3].encoder).toBe(events[4].encoder);
+});
+
+test('LayersPass#layers that are not drawn are not computed', () => {
+  const log: ComputeEvent[] = [];
+  renderWithCompute(
+    log,
+    [
+      new ComputeRecordingLayer({id: 'invisible', log, visible: false}),
+      new ComputeRecordingLayer({id: 'filtered', log}),
+      new ComputeRecordingCompositeLayer({
+        id: 'parent',
+        log,
+        children: [{id: 'only-in-B', viewportId: 'B'}]
+      }),
+      new ComputeRecordingCompositeLayer({
+        id: 'hidden-parent',
+        log,
+        visible: false,
+        children: [{id: 'child'}]
+      }),
+      new ComputeRecordingLayer({id: 'drawn', log})
+    ],
+    [new Viewport({id: 'A'}), new Viewport({id: 'B'})],
+    {layerFilter: ({layer}) => layer.id !== 'filtered'}
+  );
+
+  const computed = log
+    .filter(event => event.type === 'compute')
+    .map(event => `${event.layerId}:${event.viewportId}`);
+  const drawn = log
+    .filter(event => event.type === 'draw')
+    .map(event => `${event.layerId}:${event.viewportId}`);
+  expect(computed, 'exactly the drawn layers compute').toEqual(drawn);
+  expect(computed).toEqual(['drawn:A', 'only-in-B:B', 'drawn:B']);
+});
+
+test('LayersPass#a compute error goes to onError and drawing continues', () => {
+  const log: ComputeEvent[] = [];
+  const errors: Error[] = [];
+  renderWithCompute(
+    log,
+    [
+      new ComputeRecordingLayer({id: 'throwing', log, throwOnCompute: true}),
+      new ComputeRecordingLayer({id: 'fine', log})
+    ],
+    [new Viewport({id: 'A'})],
+    {onError: error => errors.push(error)}
+  );
+
+  expect(errors).toHaveLength(1);
+  expect(errors[0].message).toMatch(/computing .*throwing.*compute failed/);
+  expect(log.filter(event => event.type === 'compute').map(event => event.layerId)).toEqual([
+    'fine'
+  ]);
+  expect(log.filter(event => event.type === 'draw').map(event => event.layerId)).toEqual([
+    'throwing',
+    'fine'
+  ]);
+});
+
+test('LayersPass#repeated world copies each get their own compute and render pass', () => {
+  const viewport = new MapView({repeat: true}).makeViewport({
+    width: 1152,
+    height: 128,
+    viewState: {longitude: 0, latitude: 0, zoom: 0}
+  });
+  expect(viewport.subViewports, 'three visible world copies').toHaveLength(3);
+
+  const events: ComputeEvent[] = [];
+  renderWithCompute(
+    events,
+    [new ComputeRecordingLayer({id: 'computing', log: events})],
+    [viewport]
+  );
+  expect(events.map(event => event.type)).toEqual([
+    'compute',
+    'renderPass',
+    'draw',
+    'compute',
+    'renderPass',
+    'draw',
+    'compute',
+    'renderPass',
+    'draw'
+  ]);
+
+  // A stack without compute keeps sharing one WebGL render pass across the copies.
+  const renderPassCount = renderWithCompute([], [new TestLayer({id: 'plain'})], [viewport]);
+  expect(renderPassCount).toBe(device.type === 'webgpu' ? 3 : 1);
 });

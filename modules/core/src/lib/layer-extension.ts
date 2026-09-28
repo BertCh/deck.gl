@@ -79,10 +79,13 @@ export default abstract class LayerExtension<OptionsT = unknown> {
   draw(this: Layer, params: any, extension: this): void {}
 
   /**
-   * Records GPU compute work before the render pass opens.
+   * Records GPU compute work before the render pass that draws the layer opens.
    *
-   * Only called on layers whose `needsComputePass` is `true`, so an extension that wants a compute
-   * stage on an arbitrary layer also has to make that layer declare one.
+   * Called before the layer's own `compute`, with the same parameters, whenever the layer is about
+   * to be drawn in a viewport. Defining this hook is enough to opt the layer in: the base
+   * `Layer.needsComputePass` returns `true` for any layer with an extension that overrides it.
+   * Not called before picking passes. On WebGL the encoder cannot open compute passes, so check
+   * `this.context.device.type` first.
    */
   compute(this: Layer, params: LayerComputeParameters, extension: this): void {}
 

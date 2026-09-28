@@ -74,6 +74,7 @@ export default class TerrainController extends MapController {
       }
   ) {
     super.setProps({rotationPivot: '3d', ...props});
+    this._adoptAppAltitude(props.position?.[2]);
   }
 
   /**
@@ -83,6 +84,12 @@ export default class TerrainController extends MapController {
    * the terrain whether or not the user is interacting, so a gesture never has to absorb an
    * accumulated correction, and the filter runs on elapsed time rather than on how many events
    * a gesture happened to produce.
+   *
+   * @remarks
+   * While the baseline moves, this calls `onViewStateChange` from the frame loop, outside any
+   * user gesture, with an empty `interactionState` and `transitionDuration: 0`. Nothing is
+   * published while a transition is running (it owns `position`), while the user is dragging
+   * (the drag's own event carries the baseline), or once the baseline has settled.
    */
   updateTransition(): void {
     super.updateTransition();
@@ -118,6 +125,35 @@ export default class TerrainController extends MapController {
       {...extraProps, position: [position[0], position[1], this._terrainAltitude]},
       interactionState
     );
+  }
+
+  /**
+   * Takes over a baseline the app wrote into the view state itself.
+   *
+   * Once settled, the controller republishes nothing, so without this the next gesture would
+   * snap the camera from the app's `position[2]` back to the controller's own baseline. Adopting
+   * it instead lets the filter carry the camera back to the terrain at its bounded speed. Only
+   * done while settled and idle: mid-glide, a controlled app echoes values the controller has
+   * already moved past, and a transition owns `position` while it runs.
+   */
+  private _adoptAppAltitude(altitude: number | undefined): void {
+    const current = this._terrainAltitude;
+    if (
+      altitude === undefined ||
+      current === undefined ||
+      altitude === current ||
+      current !== this._terrainAltitudeTarget ||
+      this.isDragging() ||
+      this.transitionManager.getViewportInTransition()
+    ) {
+      return;
+    }
+    const pixelsPerMeter = getPixelsPerMeter(
+      this.makeViewport(this._getControllerState().getViewportProps())
+    );
+    if (Math.abs(altitude - current) > SETTLED_PIXELS / pixelsPerMeter) {
+      this._terrainAltitude = altitude;
+    }
   }
 
   /** Reads the terrain elevation under the viewport center into the target. */

@@ -21,6 +21,7 @@ import {disablePickingIndex, PICKING_INVALID_INDEX} from '../shaderlib/picking/p
 
 import Component from '../lifecycle/component';
 import LayerState, {ChangeFlags} from './layer-state';
+import LayerExtension from './layer-extension';
 
 import {worldToPixels} from '@math.gl/web-mercator';
 
@@ -307,9 +308,15 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
    * cannot be open on the same encoder at once. Declaring this makes deck.gl call
    * {@link Layer.compute} on its own encoder first, so the result is visible to the draw that
    * follows without a second submission.
+   *
+   * The base implementation returns `true` when any of the layer's extensions defines a
+   * {@link LayerExtension.compute} hook. Subclasses that override this getter should return
+   * `super.needsComputePass || ...` so that extension compute hooks keep running.
    */
   get needsComputePass(): boolean {
-    return false;
+    return this.props.extensions.some(
+      extension => extension.compute !== LayerExtension.prototype.compute
+    );
   }
 
   /** Updates selected state members and marks the layer for redraw */
@@ -567,11 +574,19 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
   }
 
   /**
-   * Records GPU compute work for this frame, before any render pass opens.
+   * Records GPU compute work for the draw that immediately follows.
    *
-   * Only called on layers whose {@link Layer.needsComputePass} is `true`, once per viewport the
-   * layer is visible in. The encoder is deck.gl's own and is submitted together with this frame's
-   * render passes, so nothing recorded here needs an explicit submission or a fence.
+   * Only called on layers whose {@link Layer.needsComputePass} is `true`, and only when the layer
+   * will actually be drawn: visible, accepted by the pass's `shouldDrawLayer`, by every parent's
+   * `filterSubLayer` and by the `layerFilter`. It runs once per physical viewport (each sub-viewport
+   * of a repeated world counts separately), right before that viewport's render pass opens. The
+   * encoder is deck.gl's own and is submitted together with the render pass, so nothing recorded
+   * here needs an explicit submission or a fence.
+   *
+   * Compute runs only before draw passes, never before picking passes; a picking shader sees the
+   * results of the most recent draw. On WebGL the encoder cannot open compute passes, so check
+   * `this.context.device.type` before calling `beginComputePass`. Errors thrown here are reported
+   * through `onError`, as for `draw`.
    */
   /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
   compute(params: LayerComputeParameters): void {}
@@ -1271,9 +1286,9 @@ export default abstract class Layer<PropsT extends {} = {}> extends Component<
     // Update composite flags
     const propsOrDataChanged = Boolean(
       changeFlags.dataChanged ||
-      changeFlags.updateTriggersChanged ||
-      changeFlags.propsChanged ||
-      changeFlags.extensionsChanged
+        changeFlags.updateTriggersChanged ||
+        changeFlags.propsChanged ||
+        changeFlags.extensionsChanged
     );
     changeFlags.propsOrDataChanged = propsOrDataChanged;
     changeFlags.somethingChanged =

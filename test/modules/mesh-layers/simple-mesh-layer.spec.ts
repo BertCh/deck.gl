@@ -3,7 +3,7 @@
 // Copyright (c) vis.gl contributors
 
 import {test, expect} from 'vitest';
-import {testLayer, generateLayerTests} from '@deck.gl/test-utils/vitest';
+import {testLayer, generateLayerTests, device} from '@deck.gl/test-utils/vitest';
 
 import {LayerManager, MapView} from '@deck.gl/core';
 import {SimpleMeshLayer} from 'deck.gl';
@@ -92,4 +92,47 @@ test('SimpleMeshLayer#tests', () => {
   });
 
   testLayer({Layer: SimpleMeshLayer, testCases, onError: err => expect(err).toBeFalsy()});
+});
+
+test('SimpleMeshLayer#unbinds a texture that is set back to null', () => {
+  const viewport = new MapView({}).makeViewport({
+    width: 100,
+    height: 100,
+    viewState: {longitude: 0, latitude: 0, zoom: 1}
+  });
+  const texture = device.createTexture({
+    data: new Uint8Array([255, 128, 64, 255]),
+    width: 1,
+    height: 1
+  });
+  const errors: Error[] = [];
+  const layerManager = new LayerManager(device, {viewport});
+  layerManager.setProps({onError: error => errors.push(error)});
+
+  const props = {
+    id: 'simple-mesh-texture-reset',
+    data: [{position: [0, 0, 0]}],
+    mesh: new TruncatedConeGeometry({height: 5, nradial: 20, nvertical: 1}),
+    getPosition: object => object.position
+  };
+  const textureBinding = device.type === 'webgpu' ? 'simpleMeshTexture' : 'sampler';
+
+  layerManager.setLayers([new SimpleMeshLayer({...props, texture})]);
+  let layer = layerManager.getLayers()[0] as SimpleMeshLayer;
+  let model = layer.state.model!;
+  expect(Boolean(model.shaderInputs.getUniformValues().simpleMesh.hasTexture)).toBe(true);
+  expect(model.shaderInputs.getBindingValues()[textureBinding]).toBe(texture);
+
+  layerManager.setLayers([new SimpleMeshLayer({...props, texture: null})]);
+  layer = layerManager.getLayers()[0] as SimpleMeshLayer;
+  model = layer.state.model!;
+  expect(Boolean(model.shaderInputs.getUniformValues().simpleMesh.hasTexture)).toBe(false);
+  expect(
+    model.shaderInputs.getBindingValues()[textureBinding],
+    'the placeholder texture is bound in place of the removed one'
+  ).toBe(layer.state.emptyTexture);
+
+  expect(errors).toEqual([]);
+  layerManager.finalize();
+  texture.delete();
 });

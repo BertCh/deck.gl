@@ -11,33 +11,36 @@ import {device} from '@deck.gl/test-utils/vitest';
 
 type ComputeRecord = {layerId: string; viewportId: string; pass: string; isPicking: boolean};
 
-/** An ordinary layer, which must never reach the compute stage. */
-class PlainLayer extends Layer {
+/** An ordinary layer, which does not declare a compute stage. */
+class PlainLayer extends Layer<{onCompute?: (record: ComputeRecord) => void}> {
   static layerName = 'PlainLayer';
   initializeState() {}
-}
-
-/** A layer that records GPU work before the render pass opens. */
-class ComputingLayer extends Layer<{onCompute: (record: ComputeRecord) => void}> {
-  static layerName = 'ComputingLayer';
-
-  initializeState() {}
-
-  get needsComputePass(): boolean {
-    return true;
-  }
 
   compute(params: LayerComputeParameters): void {
-    // The encoder deck.gl hands over must be a live one, not a placeholder.
-    expect(Boolean(params.commandEncoder), 'the compute stage receives a command encoder').toBe(
-      true
-    );
-    this.props.onCompute({
+    this.props.onCompute?.({
       layerId: this.id,
       viewportId: params.viewport.id,
       pass: params.pass,
       isPicking: params.isPicking
     });
+  }
+}
+
+/** A layer that records GPU work before the render pass opens. */
+class ComputingLayer extends PlainLayer {
+  static layerName = 'ComputingLayer';
+
+  get needsComputePass(): boolean {
+    return true;
+  }
+}
+
+/** A layer whose compute stage fails. */
+class ThrowingLayer extends ComputingLayer {
+  static layerName = 'ThrowingLayer';
+
+  compute(): void {
+    throw new Error('compute failed');
   }
 }
 
@@ -50,135 +53,49 @@ class RecordingExtension extends LayerExtension<{onCompute: (layerId: string) =>
   }
 }
 
-function makeViewports(ids: string[]): Viewport[] {
-  return ids.map(
-    id =>
-      new MapView({id}).makeViewport({
-        width: 100,
-        height: 100,
-        viewState: {longitude: 0, latitude: 0, zoom: 1}
-      }) as Viewport
-  );
+/** An extension that only draws, and so must not opt its layer into compute. */
+class DrawOnlyExtension extends LayerExtension {
+  static extensionName = 'DrawOnlyExtension';
 }
 
-function updateLayers(layers: Layer[]) {
-  const layerManager = new LayerManager(device, {viewport: makeViewports(['a'])[0]});
+function makeViewport(id: string): Viewport {
+  return new MapView({id}).makeViewport({
+    width: 100,
+    height: 100,
+    viewState: {longitude: 0, latitude: 0, zoom: 1}
+  }) as Viewport;
+}
+
+function updateLayers(layers: Layer[], onError?: (error: Error) => void) {
+  const layerManager = new LayerManager(device, {viewport: makeViewport('a')});
+  if (onError) {
+    layerManager.setProps({onError});
+  }
   layerManager.setLayers(layers);
   return layerManager;
 }
 
-test('ComputeLayersPass#only layers that declare a compute stage reach it', () => {
+test('ComputeLayersPass#computes the given layers with deck.gl encoder and pass context', () => {
   const computed: ComputeRecord[] = [];
-  const layers = [
-    new PlainLayer({id: 'plain'}),
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
-  ];
-  const layerManager = updateLayers(layers);
-  const pass = new ComputeLayersPass(device, {id: 'compute'});
-
-  pass.render({pass: 'screen', layers: layerManager.getLayers(), viewports: makeViewports(['a'])});
-
-  expect(computed.length, 'exactly one layer computed').toBe(1);
-  expect(computed[0].layerId, 'and it is the one that declared a compute stage').toBe('computing');
-  expect(pass.computedLayerCount, 'which the pass reports').toBe(1);
-  layerManager.finalize();
-});
-
-test('ComputeLayersPass#a stack with no compute stage does no work at all', () => {
-  const layerManager = updateLayers([new PlainLayer({id: 'plain'})]);
-  const pass = new ComputeLayersPass(device, {id: 'compute'});
-
-  pass.render({pass: 'screen', layers: layerManager.getLayers(), viewports: makeViewports(['a'])});
-
-  expect(pass.computedLayerCount, 'the common case costs one array scan').toBe(0);
-  layerManager.finalize();
-});
-
-test('ComputeLayersPass#each viewport computes independently', () => {
-  // What a layer computes - a sort order, a culled set - is camera-dependent, so a split-screen
-  // view needs one compute per viewport rather than one for the frame.
-  const computed: ComputeRecord[] = [];
+  const encoders: unknown[] = [];
+  class EncoderLayer extends ComputingLayer {
+    static layerName = 'EncoderLayer';
+    compute(params: LayerComputeParameters): void {
+      encoders.push(params.commandEncoder);
+      super.compute(params);
+    }
+  }
   const layerManager = updateLayers([
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
+    new EncoderLayer({id: 'computing', onCompute: record => computed.push(record)})
   ]);
   const pass = new ComputeLayersPass(device, {id: 'compute'});
 
-  pass.render({
-    pass: 'screen',
-    layers: layerManager.getLayers(),
-    viewports: makeViewports(['left', 'right'])
-  });
+  pass.computeViewport(makeViewport('left'), {pass: 'screen', layers: layerManager.getLayers()});
 
-  expect(
-    computed.map(record => record.viewportId),
-    'the layer computed once for each viewport'
-  ).toEqual(['left', 'right']);
-  layerManager.finalize();
-});
-
-test('ComputeLayersPass#one viewport can be computed at a time', () => {
-  // This is how the render passes drive it: compute a viewport, draw it, then move on, so the
-  // result a draw consumes is always the one computed for its own camera.
-  const computed: ComputeRecord[] = [];
-  const layerManager = updateLayers([
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
+  expect(computed).toEqual([
+    {layerId: 'computing', viewportId: 'left', pass: 'screen', isPicking: false}
   ]);
-  const pass = new ComputeLayersPass(device, {id: 'compute'});
-  const [left, right] = makeViewports(['left', 'right']);
-  const options = {pass: 'screen', layers: layerManager.getLayers()};
-
-  pass.beginFrame();
-  pass.computeViewport(left, options);
-  expect(
-    computed.map(record => record.viewportId),
-    'only the first camera so far'
-  ).toEqual(['left']);
-  pass.computeViewport(right, options);
-  expect(
-    computed.map(record => record.viewportId),
-    'then the second'
-  ).toEqual(['left', 'right']);
-  expect(pass.computedLayerCount, 'counted across the frame').toBe(2);
-  layerManager.finalize();
-});
-
-test('ComputeLayersPass#the layer filter applies before the compute stage', () => {
-  const computed: ComputeRecord[] = [];
-  const layerManager = updateLayers([
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
-  ]);
-  const pass = new ComputeLayersPass(device, {id: 'compute'});
-
-  pass.render({
-    pass: 'screen',
-    layers: layerManager.getLayers(),
-    viewports: makeViewports(['left', 'right']),
-    layerFilter: ({viewport}) => viewport.id === 'right'
-  });
-
-  expect(
-    computed.map(record => record.viewportId),
-    'a layer filtered out of a viewport does not compute for it either'
-  ).toEqual(['right']);
-  layerManager.finalize();
-});
-
-test('ComputeLayersPass#the picking pass is distinguishable from the screen pass', () => {
-  const computed: ComputeRecord[] = [];
-  const layerManager = updateLayers([
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
-  ]);
-  const pass = new ComputeLayersPass(device, {id: 'compute'});
-
-  pass.render({
-    pass: 'picking',
-    layers: layerManager.getLayers(),
-    viewports: makeViewports(['a']),
-    isPicking: true
-  });
-
-  expect(computed[0].pass, 'the following pass is named').toBe('picking');
-  expect(computed[0].isPicking, 'and identified as a picking pass').toBe(true);
+  expect(encoders[0], 'the encoder is the device encoder').toBe(device.commandEncoder);
   layerManager.finalize();
 });
 
@@ -193,7 +110,7 @@ test('ComputeLayersPass#extensions run before the layer itself', () => {
   ]);
   const pass = new ComputeLayersPass(device, {id: 'compute'});
 
-  pass.render({pass: 'screen', layers: layerManager.getLayers(), viewports: makeViewports(['a'])});
+  pass.computeViewport(makeViewport('a'), {pass: 'screen', layers: layerManager.getLayers()});
 
   expect(order, 'extensions get to record first, as they do for draw').toEqual([
     'extension',
@@ -202,15 +119,39 @@ test('ComputeLayersPass#extensions run before the layer itself', () => {
   layerManager.finalize();
 });
 
-test('ComputeLayersPass#an empty viewport list is a no-op', () => {
-  const computed: ComputeRecord[] = [];
+test('ComputeLayersPass#an extension compute hook opts its layer in', () => {
   const layerManager = updateLayers([
-    new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
+    new PlainLayer({id: 'plain'}),
+    new PlainLayer({id: 'draw-only', extensions: [new DrawOnlyExtension()]}),
+    new PlainLayer({
+      id: 'extended',
+      extensions: [new RecordingExtension({onCompute: () => {}})]
+    })
   ]);
+  const [plain, drawOnly, extended] = layerManager.getLayers();
+
+  expect(plain.needsComputePass, 'an ordinary layer needs no compute').toBe(false);
+  expect(drawOnly.needsComputePass, 'an extension without compute changes nothing').toBe(false);
+  expect(extended.needsComputePass, 'an extension with compute opts the layer in').toBe(true);
+  layerManager.finalize();
+});
+
+test('ComputeLayersPass#errors thrown by compute are reported through onError', () => {
+  const errors: Error[] = [];
+  const computed: ComputeRecord[] = [];
+  const layerManager = updateLayers(
+    [
+      new ThrowingLayer({id: 'throwing'}),
+      new ComputingLayer({id: 'computing', onCompute: record => computed.push(record)})
+    ],
+    error => errors.push(error)
+  );
   const pass = new ComputeLayersPass(device, {id: 'compute'});
 
-  pass.render({pass: 'screen', layers: layerManager.getLayers(), viewports: []});
+  pass.computeViewport(makeViewport('a'), {pass: 'screen', layers: layerManager.getLayers()});
 
-  expect(computed.length, 'there is no camera to compute against').toBe(0);
+  expect(errors).toHaveLength(1);
+  expect(errors[0].message).toMatch(/computing ThrowingLayer.*throwing.*compute failed/);
+  expect(computed, 'the remaining layers still compute').toHaveLength(1);
   layerManager.finalize();
 });

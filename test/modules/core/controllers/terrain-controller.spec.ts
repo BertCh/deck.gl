@@ -227,6 +227,87 @@ test('TerrainController#leaves the view state alone until the terrain is found',
   expect(app.getViewState().zoom).toBe(INITIAL_VIEW_STATE.zoom);
 });
 
+test('TerrainController#the baseline does not step while a transition runs', () => {
+  const app = createTerrainController();
+  app.setTerrainElevation(785.4);
+  app.runFrames(2);
+  const settled = app.getBaseline();
+
+  // The app starts a zoom transition, and the terrain under the center changes while it runs.
+  app.setTerrainElevation(1385.4);
+  app.controller.setProps({
+    ...app.getViewState(),
+    zoom: app.getViewState().zoom + 0.5,
+    transitionDuration: 2000
+  });
+
+  // Long enough for two picks to confirm the new elevation, well short of the transition's end.
+  for (let i = 0; i < 90; i++) {
+    app.runFrames(1);
+    expect(app.controller.transitionManager.getViewportInTransition()).toBeTruthy();
+    expect(app.getBaseline(), 'the transition owns position').toBeCloseTo(settled, 6);
+  }
+
+  // Once the transition is over the filter picks the new target up.
+  app.runFrames(40);
+  expect(app.controller.transitionManager.getViewportInTransition()).toBeFalsy();
+  expect(app.runUntilSettled(1385.4).settled).toBe(true);
+});
+
+test('TerrainController#the frame loop does not publish the baseline while dragging', () => {
+  const app = createTerrainController();
+  app.setTerrainElevation(785.4);
+  app.runFrames(2);
+  const settled = app.getBaseline();
+
+  // Let two picks confirm a new elevation, then start dragging before the glide has finished.
+  app.setTerrainElevation(1385.4);
+  app.runFrames(70);
+  expect(app.getBaseline()).toBeGreaterThan(settled);
+  expect(app.getBaseline()).toBeLessThan(1385.4);
+
+  const state = app.controller.controllerState;
+  // @ts-expect-error protected in the base class, exercised here the way a pan event would
+  app.controller.updateViewport(state, null, {isDragging: true});
+  const baselineAtDragStart = app.getBaseline();
+  const publishedAtDragStart = app.getViewStates().length;
+
+  app.runFrames(30);
+  expect(app.getViewStates(), 'nothing published from the frame loop').toHaveLength(
+    publishedAtDragStart
+  );
+  expect(app.getBaseline()).toBe(baselineAtDragStart);
+
+  // The drag's next event carries the baseline the filter advanced to in the meantime.
+  // @ts-expect-error protected in the base class, exercised here the way a pan event would
+  app.controller.updateViewport(
+    app.controller.controllerState.zoom({pos: [WIDTH / 2, HEIGHT / 2], scale: 1.01}),
+    null,
+    {isDragging: true}
+  );
+  expect(app.getBaseline()).toBeGreaterThan(baselineAtDragStart);
+});
+
+test('TerrainController#a baseline the app sets after settling is adopted, not snapped back', () => {
+  const app = createTerrainController();
+  app.setTerrainElevation(785.4);
+  app.runFrames(2);
+
+  // The app writes its own altitude into the view state.
+  app.controller.setProps({...app.getViewState(), position: [0, 0, 1000]});
+
+  // The next gesture starts from it rather than jumping back to the controller's baseline.
+  const state = app.controller.controllerState;
+  // @ts-expect-error protected in the base class, exercised here the way an event would
+  app.controller.updateViewport(state.zoom({pos: [WIDTH / 2, HEIGHT / 2], scale: 1.01}));
+  expect(app.getBaseline()).toBeCloseTo(1000, 6);
+
+  // The frame loop then glides back to the terrain at its bounded speed.
+  const {maxBaselineStep, settled} = app.runUntilSettled(785.4);
+  expect(settled).toBe(true);
+  expect(maxBaselineStep).toBeLessThan(MAX_SHIFT_PER_FRAME);
+});
+
 test('TerrainController#a baseline change translates the camera', () => {
   const viewport = new WebMercatorViewport({
     width: WIDTH,

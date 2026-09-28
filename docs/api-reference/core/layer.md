@@ -787,7 +787,7 @@ The default implementation looks for a variable `model` in the layer's state (wh
 
 #### `compute` {#compute}
 
-Records GPU compute work for this frame, before any render pass opens.
+Records GPU compute work for the draw that immediately follows.
 
 A layer that computes what it is about to draw — a GPU-driven aggregation, a sort, a culling pass —
 cannot do that inside `draw`, because a compute pass and a render pass cannot be open on the same
@@ -800,20 +800,31 @@ ordering guarantee that makes the result usable.
 Parameters:
 
 * `commandEncoder` (`CommandEncoder`) - deck.gl's own encoder, submitted together with the render
-  pass that immediately follows. Nothing recorded here needs a separate submission or a fence.
+  pass that immediately follows. Nothing recorded here needs a separate submission or a fence. Only
+  a WebGPU encoder can open compute passes: on WebGL the hook still runs, so check
+  `this.context.device.type` before calling `beginComputePass`.
 * `viewport` ([Viewport](./viewport.md)) - the viewport the layer is about to be drawn with.
-* `pass` (string) - name of the render pass that follows, for example `'screen'` or `'picking'`.
-* `isPicking` (boolean) - whether that pass renders picking colors.
+* `pass` (string) - name of the draw pass that follows, for example `'screen'`.
+* `isPicking` (boolean) - `true` only when deck.gl draws picking colors to the screen for
+  debugging. Real picking passes do not run compute.
 
-Only called on layers whose `needsComputePass` getter returns `true`, and called **once per
-viewport**, interleaved with the render passes rather than batched ahead of them. That matters as
-soon as there is more than one view: what a layer computes is camera-dependent, so computing every
-viewport up front would leave every view drawing the last one's result.
+Only called on layers whose [`needsComputePass`](#needscomputepass) getter returns `true`, and only
+when the layer is about to be drawn: it must be visible, pass the render pass's own checks, every
+parent's `filterSubLayer` and the Deck's `layerFilter`. It is called **once per physical viewport**,
+interleaved with the render passes rather than batched ahead of them. That matters as soon as there
+is more than one view: what a layer computes is camera-dependent, so computing every viewport up
+front would leave every view drawing the last one's result. For the same reason each world copy of a
+`MapView` with `repeat: true` gets its own compute and render pass while any drawn layer needs
+compute.
+
+Compute runs only before draw passes. Picking passes do not run it, so a layer's picking shader sees
+the results of the most recent draw. Errors thrown from `compute` are reported through
+[`onError`](#onerror), the same way as errors thrown from `draw`.
 
 ```js
 class MyLayer extends Layer {
   get needsComputePass() {
-    return true;
+    return this.context.device.type === 'webgpu';
   }
 
   compute({commandEncoder, viewport}) {
@@ -824,8 +835,28 @@ class MyLayer extends Layer {
 }
 ```
 
-[Layer extensions](../../developer-guide/custom-layers/layer-extensions.md) have a matching `compute` hook, which runs before the layer's
-own — but only on layers that already declare a compute stage.
+[Layer extensions](../../developer-guide/custom-layers/layer-extensions.md#compute) have a matching
+`compute` hook, which runs before the layer's own.
+
+A custom `LayersPass` subclass that overrides `_render()` must forward `options.computePass` (and
+compute each viewport before opening its render pass), or compute work is silently dropped for any
+layer that opts in.
+
+#### `needsComputePass` {#needscomputepass}
+
+Getter. `true` if this layer records GPU compute work before the render pass opens, which makes
+deck.gl call [`compute`](#compute) before each draw of the layer.
+
+The default implementation returns `true` when any of the layer's
+[`extensions`](#extensions) defines a `compute` hook, and `false` otherwise, so ordinary layers pay
+nothing. A subclass that overrides it should include the default, so that extension compute hooks
+keep running:
+
+```js
+get needsComputePass() {
+  return super.needsComputePass || this.context.device.type === 'webgpu';
+}
+```
 
 #### `getPickingInfo` {#getpickinginfo}
 

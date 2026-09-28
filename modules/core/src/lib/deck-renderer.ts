@@ -75,14 +75,12 @@ export default class DeckRenderer {
   }) {
     const layerPass = this.drawPickingColors ? this.pickLayersPass : this.drawLayersPass;
 
-    // Compute runs on deck.gl's own encoder immediately before each viewport's render pass, so a
-    // layer that computes what it draws never submits separately or synchronizes by hand, and a
-    // multi-view frame gets one result per camera rather than the last camera's for all of them.
-    this.computeLayersPass.beginFrame();
-
     const renderOpts: LayersPassRenderOptions = {
       layerFilter: this.layerFilter,
       isPicking: this.drawPickingColors,
+      // Compute runs on deck.gl's own encoder immediately before each viewport's render pass, so
+      // a layer that computes what it draws never submits separately or synchronizes by hand, and
+      // a multi-view frame gets one result per camera rather than the last camera's for all.
       computePass: this.computeLayersPass,
       ...opts
     };

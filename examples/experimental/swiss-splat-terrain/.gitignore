@@ -1,6 +1,0 @@
-# Baked splat archives. They are build output: `npm run bake -- --scene <id>` regenerates one
-# from its source PLY, and a 1.7M-splat scene is tens of megabytes of binary chunks.
-public/splat-archives/
-
-# Source PLY files the baker downloads once and reuses across runs.
-.splat-cache/

@@ -299,8 +299,10 @@ export default class SimpleMeshLayer<DataT = any, ExtraPropsT extends {} = {}> e
       this.getAttributeManager()!.invalidateAll();
     }
 
-    if (props.texture !== oldProps.texture && props.texture instanceof Texture) {
-      this.setTexture(props.texture);
+    // A texture that goes away must be unbound too: the layer destroys the one it created from the
+    // old prop, and a model still holding it draws with a destroyed handle.
+    if (props.texture !== oldProps.texture) {
+      this.setTexture(props.texture instanceof Texture ? props.texture : null);
     }
 
     if (this.state.model) {
@@ -351,7 +353,7 @@ export default class SimpleMeshLayer<DataT = any, ExtraPropsT extends {} = {}> e
     return model;
   }
 
-  private setTexture(texture: Texture): void {
+  private setTexture(texture: Texture | null): void {
     const {model} = this.state;
 
     // props.mesh may not be ready at this time.

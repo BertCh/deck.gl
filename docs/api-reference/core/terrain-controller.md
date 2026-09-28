@@ -30,6 +30,12 @@ Two things keep the baseline from showing up as camera motion of its own:
 
 The baseline tracks the terrain on every rendered frame rather than only while the user is interacting, so a gesture never has to absorb an accumulated correction.
 
+### View state updates from the frame loop
+
+Because the baseline is tracked every frame, the controller calls `onViewStateChange` outside of any user gesture while the baseline is moving. These updates change only `position[2]` (plus `zoom` and the center on the first fix), carry an empty `interactionState` and `transitionDuration: 0`. An app that controls `viewState` must apply them as it would any other update. Nothing is published once the baseline has settled, while a view state transition is running (the transition owns `position`), or while the user is dragging (the drag's own events carry the baseline).
+
+If the app itself sets a view state with a different `position[2]` after the baseline has settled, the controller takes that value over as its baseline and eases the camera back to the terrain at the same bounded speed, rather than snapping it back on the next gesture.
+
 ## Usage
 
 Use with the default view:

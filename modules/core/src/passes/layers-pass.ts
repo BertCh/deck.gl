@@ -62,9 +62,12 @@ export type LayersPassRenderOptions = {
   /**
    * Records layer compute work into deck.gl's encoder before each viewport's render pass opens.
    *
-   * Interleaved with the render passes rather than batched ahead of them, because what a layer
-   * computes is camera-dependent: computing every viewport up front would leave every view drawing
-   * the last one's result.
+   * Only layers that will be drawn in the viewport (visible, accepted by `shouldDrawLayer`, their
+   * parents' `filterSubLayer` and `layerFilter`) are computed. Compute is interleaved with the
+   * render passes rather than batched ahead of them, because what a layer computes is
+   * camera-dependent: computing every viewport up front would leave every view drawing the last
+   * one's result. For the same reason, when any drawn layer needs compute, each sub-viewport
+   * (e.g. a repeated world copy) gets its own compute and render pass.
    */
   computePass?: ComputeLayersPass | null;
 };
@@ -90,6 +93,18 @@ export type RenderStats = {
   compositeCount: number;
   pickableCount: number;
 };
+
+/** Returns the layers that will be drawn in a viewport and declare a compute stage. */
+function getComputeLayers(layers: Layer[], drawLayerParams: DrawLayerParameters[]): Layer[] {
+  const computeLayers: Layer[] = [];
+  for (let layerIndex = 0; layerIndex < layers.length; layerIndex++) {
+    const layer = layers[layerIndex];
+    if (drawLayerParams[layerIndex].shouldDrawLayer && layer.isDrawable && layer.needsComputePass) {
+      computeLayers.push(layer);
+    }
+  }
+  return computeLayers;
+}
 
 /** A Pass that renders all layers */
 export default class LayersPass extends Pass {
@@ -149,20 +164,26 @@ export default class LayersPass extends Pass {
         const drawLayerParams = this._getDrawLayerParams(viewport, options);
         const view = views && views[viewport.id];
         const subViewports = viewport.subViewports || [viewport];
+        const computeLayers = options.computePass
+          ? getComputeLayers(options.layers, drawLayerParams)
+          : [];
         // WebGL renders one logical viewport per pass. WebGPU must submit each physical
-        // viewport before shared model uniforms are updated for the next one.
-        const renderGroups = submitEachRenderPass
-          ? subViewports.map(subViewport => [subViewport])
-          : [subViewports];
+        // viewport before shared model uniforms are updated for the next one. Compute results
+        // are camera-dependent, so a physical viewport that computes also needs its own pass.
+        const renderGroups =
+          submitEachRenderPass || computeLayers.length > 0
+            ? subViewports.map(subViewport => [subViewport])
+            : [subViewports];
 
         for (const renderGroup of renderGroups) {
-          for (const subViewport of renderGroup) {
-            options.computePass?.computeViewport(subViewport, {
-              pass,
-              layers: options.layers,
-              isPicking: options.isPicking,
-              layerFilter: options.layerFilter
-            });
+          if (computeLayers.length > 0) {
+            for (const subViewport of renderGroup) {
+              options.computePass!.computeViewport(subViewport, {
+                pass,
+                layers: computeLayers,
+                isPicking: options.isPicking
+              });
+            }
           }
 
           const renderPass = this.device.beginRenderPass({
