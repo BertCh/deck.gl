@@ -23,9 +23,9 @@ State as of 2026-09-28.
 
 | Repo | Branch | Base | Required? |
 | --- | --- | --- | --- |
-| deck.gl | `splat-layers` | upstream `master` `7fa7dc7d9` (lerna `9.4.0-beta.4`) | this repo |
-| luma.gl | `deck-splat-layers` | upstream `master` `80fc29583` | **yes**, for `@deck.gl/splat-layers` and the example |
-| loaders.gl | `splat-loaders` | upstream `46d405d58` | no |
+| deck.gl ([BertCh/deck.gl](https://github.com/BertCh/deck.gl/tree/splat-layers)) | `splat-layers` | upstream `master` `7fa7dc7d9` (lerna `9.4.0-beta.4`) | this repo |
+| luma.gl ([BertCh/luma.gl](https://github.com/BertCh/luma.gl/tree/deck-splat-layers)) | `deck-splat-layers` | upstream `master` `80fc29583` | **yes**, for `@deck.gl/splat-layers` and the example |
+| loaders.gl | `splat-loaders` (not published) | upstream `46d405d58` | no |
 
 ### luma.gl: `deck-splat-layers`
 
@@ -113,8 +113,8 @@ root to that release, and drop `LUMA_SOURCE` from the example.
 Prerequisites: Node 22 (`.nvmrc`), git, and Yarn 1 for the root workspace.
 
 ```bash
-git clone -b splat-layers <deck.gl remote> deck.gl
-git clone -b deck-splat-layers <luma.gl remote> vis.gl-build/luma.gl
+git clone --filter=blob:none -b splat-layers https://github.com/BertCh/deck.gl.git deck.gl
+git clone --filter=blob:none -b deck-splat-layers https://github.com/BertCh/luma.gl.git vis.gl-build/luma.gl
 
 cd deck.gl && yarn                                          # root workspace
 cd examples/experimental/swiss-splat-terrain && npm ci      # the example is not a workspace
