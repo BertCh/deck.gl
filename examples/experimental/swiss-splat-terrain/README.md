@@ -143,7 +143,10 @@ Both layers now also forward `kernel2DSize`, the screen-space dilation those two
 top of — luma.gl defaults it to Mip-Splatting's 0.3, which is calibrated for a scene *trained* with
 the matching 3D filter and is about a third of what an untrained lattice would need.
 
-Point `LUMA_SOURCE` at a luma.gl checkout to run that version:
+Point `LUMA_SOURCE` at a luma.gl checkout of the `deck-splat-layers` branch to run that version.
+Upstream luma.gl `master` is not enough: it lacks ten of the `@luma.gl/splats` exports the
+promoted layer imports. See [`SPLAT-LAYERS-BRANCH.md`](../../../SPLAT-LAYERS-BRANCH.md) for where
+that branch lives.
 
 ```bash
 LUMA_SOURCE=/path/to/luma.gl npm run start-local
