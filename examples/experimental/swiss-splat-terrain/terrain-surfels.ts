@@ -485,24 +485,24 @@ export function setQuaternionFromBasis(
   if (trace > 0) {
     const s = Math.sqrt(trace + 1) * 2;
     w = 0.25 * s;
-    x = (m12 - m21) / s;
-    y = (m20 - m02) / s;
-    z = (m01 - m10) / s;
+    x = (m21 - m12) / s;
+    y = (m02 - m20) / s;
+    z = (m10 - m01) / s;
   } else if (m00 > m11 && m00 > m22) {
     const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
-    w = (m12 - m21) / s;
+    w = (m21 - m12) / s;
     x = 0.25 * s;
     y = (m10 + m01) / s;
     z = (m20 + m02) / s;
   } else if (m11 > m22) {
     const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
-    w = (m20 - m02) / s;
+    w = (m02 - m20) / s;
     x = (m10 + m01) / s;
     y = 0.25 * s;
     z = (m21 + m12) / s;
   } else {
     const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
-    w = (m01 - m10) / s;
+    w = (m10 - m01) / s;
     x = (m20 + m02) / s;
     y = (m21 + m12) / s;
     z = 0.25 * s;
