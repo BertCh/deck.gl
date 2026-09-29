@@ -158,16 +158,12 @@ export type SplatLayerProps = {
    */
   splatHierarchy?: SplatHierarchySource | null;
   /**
-   * Geometric error, in CSS pixels, a streaming node may project to before it is refined.
+   * Geometric error, in pixels, a streaming node may project to before it is refined.
    *
    * The sharpness dial. A node's error is the mean spacing of its own splats across the region it
    * covers, so this reads directly: at 2, refinement continues until the splats the camera is
    * looking at sit about two pixels apart. Lower values fetch more and sort more; the residency
    * budget is what stops it, and where the budget binds first this does nothing.
-   *
-   * CSS pixels, like every other pixel size in deck.gl, so one setting looks the same on any
-   * display. Measured in device pixels it would refine twice as deep on a 2x display - four times
-   * the splats, for detail finer than the blended result can show.
    */
   maximumScreenSpaceError?: number;
   /**
@@ -1478,8 +1474,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
    * The view is expressed in *scene units*, not deck.gl's common space: node bounds are in the
    * scene's own coordinates, and `_updateCamera` has already produced the camera position in those
    * same coordinates through the inverse model matrix. Screen-space error is a ratio of the two
-   * times a focal length in pixels, so it comes out in whichever pixels the viewport size is given
-   * in - CSS pixels here, which is what `maximumScreenSpaceError` is documented in.
+   * times a focal length in pixels, so it comes out in real pixels as long as both sides agree.
    *
    * The viewport's target, taken into scene units the same way, is the focus the distance falloff
    * is measured from, and the camera's travel relative to it is what motion coarsening measures.
@@ -1491,6 +1486,8 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       return;
     }
 
+    const {device} = this.context;
+    const ratio = device.canvasContext?.cssToDeviceRatio?.() ?? 1;
     // `fovyRadians` is the base viewport's; `fovy` is WebMercatorViewport's, in degrees.
     const viewportWithFieldOfView = viewport as unknown as {fovyRadians?: number; fovy?: number};
     const verticalFieldOfView =
@@ -1524,7 +1521,7 @@ export default class SplatLayer extends Layer<SplatLayerProps> {
       // Copied: the traversal keeps the view to re-run it when a page lands, and the cache is
       // overwritten in place every frame.
       cameraPosition: [...camera.cameraPosition],
-      viewportSize: [Math.max(1, viewport.width), Math.max(1, viewport.height)],
+      viewportSize: [Math.max(1, viewport.width * ratio), Math.max(1, viewport.height * ratio)],
       modelViewProjectionMatrix: Array.from(camera.modelViewProjectionMatrix),
       requestErrorScale,
       ...(focusDistance > 0 ? {focusDistance} : {}),

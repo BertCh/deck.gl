@@ -301,9 +301,9 @@ controller pull the centre down onto the terrain overrides exactly those numbers
 ## Controls
 
 - **Place** — Matterhorn, Lauterbrunnen or Aletsch.
-- **Detail** — the geometric error, in CSS pixels, a level-of-detail node may project to before it is
-  refined. A node's error is the spacing of its own splats, so this reads directly: at 2,
-  refinement continues until the splats being looked at sit about two pixels apart. Defaults to
+- **Detail** — the geometric error, in drawing-buffer pixels, a level-of-detail node may project to
+  before it is refined. A node's error is the spacing of its own splats, so this reads directly: at
+  2, refinement continues until the splats being looked at sit about two pixels apart. Defaults to
   2 px on WebGPU and 8 px on WebGL2, where every frontier change is a CPU resort.
 - **GPU residency** — a ceiling on what stays on the GPU, and the layer's renderer reservation.
   Changing it admits or evicts pages and re-downloads nothing. It is usually what binds, and it is

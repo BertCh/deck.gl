@@ -96,7 +96,10 @@ const DEFAULT_RESIDENCY = getPreferredResidency(CONSERVATIVE_MAX_RESIDENT, devic
  */
 const RENDER_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, 1.5);
 
-/** Geometric error, in CSS pixels, a level-of-detail node may project to before it is refined. */
+/**
+ * Geometric error, in drawing-buffer pixels, a level-of-detail node may project to before it is
+ * refined.
+ */
 const DETAIL_OPTIONS = [1, 2, 4, 8] as const;
 const DEFAULT_DETAIL = deviceType === 'webgpu' ? 2 : 8;
 

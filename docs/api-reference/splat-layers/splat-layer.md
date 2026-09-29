@@ -133,13 +133,10 @@ the layer's residency manager and destroyed when evicted. Compared by identity.
 
 - Default: `2`
 
-Geometric error, in CSS pixels, a streaming node may project to before it is refined. The sharpness
+Geometric error, in pixels, a streaming node may project to before it is refined. The sharpness
 dial: a node's error is the mean spacing of its own splats, so at `2` refinement continues until the
 splats you are looking at sit about two pixels apart. Where the residency budget binds first, this
 does nothing.
-
-CSS pixels rather than device pixels, like other pixel sizes in deck.gl, so one value looks the same
-on any display; a 2x display is not refined twice as deep.
 
 #### `residencyBudget` (SplatResidencyBudget, optional) {#residencybudget}
 
