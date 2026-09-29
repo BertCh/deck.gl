@@ -175,15 +175,6 @@ export type TerrainSplatSourceProps = {
   sigma: number;
   thickness: number;
   relief: number;
-  /**
-   * Metres each splat is pushed along its own normal, to clear the mesh drawn underneath it.
-   *
-   * A `TerrainLayer` built from the same elevation service at `meshMaxError: 4` is a coarser
-   * reading of the surface than one splat per elevation sample, so on a convex ridge the triangles cut *outside* the splats and hide the
-   * surface they were built from. Lifting along the normal rather than vertically is what keeps a
-   * cliff face from sliding sideways as it clears.
-   */
-  lift: number;
   haze: TerrainHaze | null;
   /**
    * Nodes the renderer's command graph is compiled for.
@@ -562,7 +553,6 @@ export class TerrainSplatSource implements SplatHierarchySource {
       sigma: this.props.sigma,
       thickness: this.props.thickness,
       relief: this.props.relief,
-      lift: this.props.lift,
       haze: this.props.haze
     };
 

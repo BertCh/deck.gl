@@ -42,7 +42,6 @@ export type TerrainTileRequest = {
   sigma: number;
   thickness: number;
   relief: number;
-  lift: number;
   haze: TerrainHaze | null;
 };
 

@@ -24,8 +24,8 @@ const COMMON_WORLD_SIZE = 512;
  * difference of 0.11%. That looks like a rounding choice and is harmless on its own — but the
  * layer converts scene units back to common space with deck's number, so building positions with
  * the *true* circumference and expanding them with deck's leaves a 0.11% scale error. A few
- * kilometres from the origin that is metres of drift, which on a hillside is a visible slip
- * between the splats and the mesh underneath them.
+ * kilometres from the origin that is metres of drift: every splat lands a little off the ground
+ * it was cut from, and off any other layer placed on the same map.
  *
  * So the two are kept apart deliberately: ground *sizes* use the real circumference, because a
  * splat's extent is a real distance, and the conversion to common space uses deck's, because

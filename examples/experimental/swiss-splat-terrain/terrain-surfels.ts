@@ -87,8 +87,6 @@ export type TerrainSurfelOptions = {
   thickness: number;
   /** How much of the shading is the relief light rather than the imagery's own. */
   relief: number;
-  /** Metres each splat is pushed along its normal, to clear a mesh drawn underneath it. */
-  lift: number;
   /** Direction the relief light comes from, as a unit vector in east / north / up. */
   sun: readonly [number, number, number];
   /** Colour used where imagery failed to load, as display-space RGB in `[0, 255]`. */
@@ -190,21 +188,6 @@ export const TERRAIN_SURFEL_DEFAULTS = {
   thickness: 0.45,
 
   /**
-   * How far each splat is lifted along the surface normal, in metres.
-   *
-   * The splats and the `TerrainLayer` mesh are derived from the same elevation data, but not at the
-   * same resolution: the mesh is simplified to `meshMaxError` and built from a deeper zoom, so the
-   * two surfaces disagree by a few metres on steep ground. Drawn coincident, roughly half of each
-   * splat would land behind the mesh and be depth-tested away, which reads as tearing.
-   *
-   * Lifting along the normal rather than straight up keeps the offset perpendicular on a cliff,
-   * where a vertical lift would slide the surface sideways instead. At the distances this is viewed
-   * from it is invisible; what it buys is that the mesh still occludes splats behind a ridge while
-   * never fighting the ones in front of it.
-   */
-  lift: 3,
-
-  /**
    * How much of a splat's brightness is the relief term rather than the orthophoto's own.
    *
    * Small on purpose. The imagery is the data and the shading is an annotation on it: at 0.32 a
@@ -232,9 +215,8 @@ export const TERRAIN_SURFEL_DEFAULTS = {
   /**
    * Colour used where imagery is missing.
    *
-   * A light grey rather than the mesh's unlit `[56, 60, 66]`, because these splats are shaded and
-   * that one is not: multiplied by the relief term, anything darker collapses into the background
-   * and the bare patch reads as a hole rather than as ground without a photograph on it.
+   * A light grey, because it is multiplied by the relief term: anything darker collapses into the
+   * background and the bare patch reads as a hole rather than as ground without a photograph on it.
    */
   missingImageryRgb: [150, 152, 156] as readonly [number, number, number]
 } as const;
@@ -357,12 +339,12 @@ export function buildTerrainSurfels(
       // The splat sits at its sample pixel's CENTRE. Every tile cut from the same plane samples the
       // same lattice, so the seam between two tiles is one ordinary sample interval - never a
       // doubled row, never a gap.
-      const east = (commonX - originX) / originUnitsPerMeter + normal[0] * options.lift;
+      const east = (commonX - originX) / originUnitsPerMeter;
       // Common-space y increases southward; scene north is +y, so the sign flips here.
-      const north = -(commonY - originY) / originUnitsPerMeter + normal[1] * options.lift;
+      const north = -(commonY - originY) / originUnitsPerMeter;
       // The anchor sits at 0 m, so scene z is the elevation itself. Nothing has to know the ground
       // height at the origin, and the layer places the anchor at exactly `z = 0`.
-      const up = height + normal[2] * options.lift;
+      const up = height;
 
       positions[index * 3] = east;
       positions[index * 3 + 1] = north;

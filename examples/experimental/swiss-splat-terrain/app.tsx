@@ -2,14 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) vis.gl contributors
 
-import {
-  AmbientLight,
-  DirectionalLight,
-  LightingEffect,
-  MapView,
-  type MapViewState
-} from '@deck.gl/core';
-import {TerrainLayer} from '@deck.gl/geo-layers';
+import {MapView, type MapViewState} from '@deck.gl/core';
 import {DeckGL} from '@deck.gl/react';
 import {luma} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
@@ -17,7 +10,7 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 
 import {SplatLayer, type SplatStreamingStats} from '@deck.gl/splat-layers';
-import {ELEVATION_DECODER, getPlaceViewState, PLACES, TERRAIN_IMAGE} from './scenes';
+import {getPlaceViewState, PLACES, TERRAIN_IMAGE} from './scenes';
 import {
   LIVE_SPLATS_PER_TILE,
   TerrainSplatSource,
@@ -60,7 +53,9 @@ const deviceType: 'webgpu' | 'webgl' =
  * is about 3.2M after the reservation factor. `splat-device.ts` asks for 512 MiB instead, which is
  * 12.9M -- so the ladder below is offered as far up as the device granted and no further.
  */
-const RESIDENCY_LADDER = [400_000, 800_000, 1_600_000, 3_200_000, 6_400_000] as const;
+const RESIDENCY_LADDER = [
+  1_600_000, 3_200_000, 6_400_000, 12_800_000, 25_600_000, 51_200_000, 102_400_000
+] as const;
 
 /**
  * What the ladder is capped at by default, when the device allows more.
@@ -128,39 +123,6 @@ const ORBIT_RESUME_MS = 3500;
 /** Anti-popping ramp lengths, as the layer's fade props. See `SplatLayer.fadeInDuration`. */
 const FADES_ON = {fadeInDuration: 300, fadeOutDuration: 150, fadeHoldDuration: 2000};
 const FADES_OFF = {fadeInDuration: 0, fadeOutDuration: 0, fadeHoldDuration: 0};
-
-/**
- * The same sun the tile worker shades its splats with, pointed at the mesh underneath them.
- *
- * `terrain-tile.worker.ts` bakes a north-west light into each splat's DC colour, which the splat
- * renderer has no lighting stage to apply for it. The `TerrainLayer` mesh does have one, and it
- * is visible: through the gaps on cliffs past the slope-stretch ceiling, and everywhere past the
- * splat frontier. Lit differently it reads as a flat cut-out against shaded splats, so the two are
- * matched here rather than left to disagree.
- *
- * `direction` is the direction the light *travels*, in deck.gl's common space -- where x is east,
- * y increases **southward** and z is up. The worker's sun vector points the other way, in an
- * east/north/up frame, so this is that vector negated with its northing sign flipped:
- * `[-0.48, 0.42, 0.77]` east/north/up becomes `[0.48, 0.42, -0.77]` here.
- */
-const TERRAIN_LIGHTING = new LightingEffect({
-  // Split 0.68 / 0.32 to match the worker's `1 - relief` and `relief` exactly, so a slope carries
-  // the same brightness whichever surface is drawing it. See `TERRAIN_SURFEL_DEFAULTS.relief`.
-  ambientLight: new AmbientLight({color: [255, 255, 255], intensity: 1}),
-  sun: new DirectionalLight({
-    color: [255, 255, 255],
-    intensity: 1,
-    direction: [0.48, 0.42, -0.77]
-  })
-});
-
-/** Matches the worker's `shade = (1 - relief) + relief * lambert`, with no specular term. */
-const TERRAIN_MATERIAL = {
-  ambient: 0.68,
-  diffuse: 0.32,
-  shininess: 1,
-  specularColor: [0, 0, 0] as [number, number, number]
-};
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 3) {
@@ -253,9 +215,6 @@ export default function App() {
       )
     );
   }, []);
-  const [showSplats, setShowSplats] = useState(true);
-  const [showMeshTexture, setShowMeshTexture] = useState(true);
-  const [wireframe, setWireframe] = useState(false);
   const [source, setSource] = useState<TerrainSplatSource | null>(null);
   const [streaming, setStreaming] = useState<SplatStreamingStats | null>(null);
   const [sourceStats, setSourceStats] = useState<TerrainSourceStats | null>(null);
@@ -283,9 +242,8 @@ export default function App() {
       sigma: TERRAIN_SURFEL_DEFAULTS.sigma,
       thickness: TERRAIN_SURFEL_DEFAULTS.thickness,
       relief: TERRAIN_SURFEL_DEFAULTS.relief,
-      lift: TERRAIN_SURFEL_DEFAULTS.lift,
-      // No haze: the mesh below continues past the splat frontier, so there is no edge to hide.
-      // See TERRAIN_HAZE.
+      // No haze: the coarse levels of the tree reach the horizon, so there is no frontier edge to
+      // hide. See TERRAIN_HAZE.
       haze: null,
       maxResidentNodes: LIVE_MAX_RESIDENT_NODES
     });
@@ -374,50 +332,9 @@ export default function App() {
   }, [source]);
 
   const residencyBudget = useMemo(() => ({maxResidentSplats: residencyLimit}), [residencyLimit]);
-  const meshTexture = place.imageryUrl;
 
   const layers = [
-    /**
-     * The mesh the splats are drawn over.
-     *
-     * It writes the depth that occludes splats behind a ridge, which is the whole point of sharing
-     * one render pass; it continues past the splat frontier to the horizon, so the streamed scene
-     * ends in terrain rather than in mid air; and it is the opaque surface that stops the sky showing
-     * through wherever the splats have not landed yet.
-     *
-     * At `meshMaxError: 4` the triangles are a coarser reading of the surface than one splat per
-     * elevation sample, so on a convex ridge the mesh would cut outside the splats and hide them. The
-     * source lifts each splat `TERRAIN_SURFEL_DEFAULTS.lift` metres along its own normal to clear it.
-     *
-     * The texture is the place's own orthophoto - the same imagery the splats are coloured from, so
-     * the two agree rather than arguing - and `TERRAIN_MATERIAL` is split to the worker's
-     * `1 - relief` / `relief` exactly so a lit mesh and a relief-shaded splat land on the same
-     * brightness.
-     */
-    new TerrainLayer({
-      id: 'swiss-terrain',
-      elevationData: TERRAIN_IMAGE,
-      elevationDecoder: ELEVATION_DECODER,
-      // Dropping the texture leaves bare relief under the splats, which is how to see what the
-      // splats themselves contribute. The mesh stays in the scene either way, because it writes the
-      // depth that occludes distant splats.
-      ...(showMeshTexture && meshTexture ? {texture: meshTexture} : {}),
-      // SWISSIMAGE serves 256px tiles, so matching the scheme keeps the orthophoto at native
-      // resolution instead of upsampling it across Mapterhorn's 512px elevation tiles.
-      tileSize: 256,
-      minZoom: 0,
-      maxZoom: 17,
-      refinementStrategy: 'best-available',
-      meshMaxError: 4,
-      wireframe,
-      color: showMeshTexture && meshTexture ? [255, 255, 255] : [56, 60, 66],
-      material: TERRAIN_MATERIAL,
-      // Scoped to this layer: a global cullMode would also cull the splat quads.
-      parameters: {cullMode: 'back'},
-      // For the elevation tooltip.
-      pickable: '3d'
-    }),
-    showSplats && source
+    source
       ? new SplatLayer({
           id: 'swiss-splats',
           splatHierarchy: source,
@@ -436,9 +353,6 @@ export default function App() {
           // roughly a tenth of the frame and is the largest fidelity difference at distance.
           fragmentKernel: analytic ? 'analytic' : 'gaussian',
           ...(fades ? FADES_ON : FADES_OFF),
-          // The mesh already wrote depth into this pass.
-          depthCompare: 'less-equal',
-          depthWriteEnabled: false,
           parameters: {cullMode: 'none'},
           onStreamingStats
         })
@@ -457,8 +371,6 @@ export default function App() {
           interactionAt.current = performance.now();
           setViewState(next as MapViewState);
         }}
-        // Only the terrain mesh reads this; the splat layer carries its light already baked in.
-        effects={[TERRAIN_LIGHTING]}
         // WebGPU when the browser has it. The splat layer binds a fully GPU-side renderer there
         // and a CPU-sorting fallback on WebGL2; `?device=webgl` forces the fallback.
         deviceProps={{type: deviceType, adapters: [SPLAT_ADAPTER]}}
@@ -468,11 +380,6 @@ export default function App() {
         // the controller pull the centre down onto the terrain overrides exactly those numbers.
         controller={{inertia: true}}
         layers={layers}
-        getTooltip={({coordinate, picked}) =>
-          picked && coordinate && coordinate.length === 3
-            ? `Elevation: ${coordinate[2].toFixed(0)} m`
-            : null
-        }
       />
 
       <aside className="panel">
@@ -526,32 +433,6 @@ export default function App() {
         </label>
 
         <div className="toggles">
-          <label>
-            <input
-              type="checkbox"
-              checked={showSplats}
-              onChange={event => setShowSplats(event.target.checked)}
-            />
-            <span>Splats</span>
-          </label>
-          {meshTexture && (
-            <label>
-              <input
-                type="checkbox"
-                checked={showMeshTexture}
-                onChange={event => setShowMeshTexture(event.target.checked)}
-              />
-              <span>Mesh texture</span>
-            </label>
-          )}
-          <label>
-            <input
-              type="checkbox"
-              checked={wireframe}
-              onChange={event => setWireframe(event.target.checked)}
-            />
-            <span>Wireframe</span>
-          </label>
           <label title="Ramp a page up as it arrives, and hold the page it replaces until the ramp finishes.">
             <input
               type="checkbox"

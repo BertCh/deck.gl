@@ -1,7 +1,7 @@
 # Swiss splat terrain
 
-Mapterhorn elevation, swisstopo SWISSIMAGE orthophotography, and Gaussian splats — composited in a
-single deck.gl render pass over the Swiss Alps.
+Mapterhorn elevation and swisstopo SWISSIMAGE orthophotography, turned into Gaussian splats in the
+browser and streamed over the Swiss Alps.
 
 No access token is required for any data source in this example.
 
@@ -14,12 +14,11 @@ error quadtree streams it from zoom 9 to zoom 17, and every resident tile — at
 the frontier at once — enters one global back-to-front order, every frame. Nothing was baked,
 trained or hosted for it.
 
-The splats reach the screen through one `SplatLayer`, drawn over a `TerrainLayer` mesh in the same
-pass.
+The splats reach the screen through one `SplatLayer`, and nothing else is drawn.
 
 > A mesh draws a height field better than this does, and should. Nobody should ship terrain as a
-> million Gaussians because it is cheaper; the result worth having is that the same five columns
-> feed both, and that an ordinary tiled surface reads as a stream of Gaussian primitives.
+> million Gaussians because it is cheaper; the result worth having is that an ordinary tiled surface
+> reads as a stream of Gaussian primitives, through the same renderer a trained scene would use.
 
 ## Run
 
@@ -60,7 +59,7 @@ that crawl as the camera turns; too thick and the ground turns into a slab. It i
 in-plane extent, it is **0.45**, and it was arrived at by sweeping the Matterhorn scene rather than
 by reasoning about what a surfel ought to be — which gave 0.12 and was wrong by a factor of four.
 `TERRAIN_SURFEL_DEFAULTS.thickness`, and the measurement is under
-[Five things that are not obvious](#five-things-that-are-not-obvious).
+[Four things that are not obvious](#four-things-that-are-not-obvious).
 
 **Fades.** Turn the `Fades` checkbox off and drag. Every level change in the streaming frontier
 becomes a visible snap, because the traversal swaps a coarse parent for four finer children in one
@@ -104,12 +103,11 @@ renderer share one `Device` implementation.
 
 ## What it demonstrates
 
-**The terrain occludes the splats correctly, in one pass.** Both of luma.gl's pass-sharing splat
+**Every level of the tree lands in one depth order.** Both of luma.gl's pass-sharing splat
 renderers record into an *existing* render pass. `SplatLayer` is an ordinary `Layer` subclass, so
-deck.gl hands it the same `renderPass` it already opened for the layer stack. The `TerrainLayer`
-draws first and writes depth; the splat layer then draws with `depthCompare: 'less-equal'` and
-`depthWriteEnabled: false`. A splat behind a ridge is hidden by that ridge, while the splats stay
-correctly ordered among themselves through a global depth sort.
+deck.gl hands it the same `renderPass` it already opened for the layer stack, and every resident
+tile, at every zoom in the frontier, goes through one global depth sort. A ridge hides what is
+behind it because its splats are nearer, not because anything else wrote depth.
 
 **A Gaussian splat does not have to come from a camera rig.** What a splat renderer needs is a
 position, an orientation, three extents, a colour and an opacity, and a digital elevation model
@@ -149,7 +147,7 @@ The tree refines by `replace`. Terrain is not a fixed set of primitives: it is a
 raster has a different resolution at every zoom — so each level *resamples the same ground* more
 finely, a node and its children describe the same surface twice, and only one of them may be drawn.
 
-### Five things that are not obvious
+### Four things that are not obvious
 
 **Splats are oriented to the surface, and stretched on the slope.** The orientation comes from
 the elevation gradient, so a disc lies *in* the hillside rather than facing the sky. Its in-plane
@@ -169,11 +167,9 @@ enough to vertical that an unclamped build measured a **58x** stretch — a thre
 smeared into a ninety-metre streak. Those streaks are not detail; they are an artefact of asking a
 height field to describe a surface it cannot represent, since a raster has one elevation per cell
 and a vertical face is exactly where adjacent samples stop saying anything about what lies between
-them. Clamped at 3x, the correction still covers everything up to about 71 degrees, about 2% of
-splats hit the ceiling, and what shows through the gaps there is the terrain mesh — drawn from the
-same data and still underneath. On a face that steep the camera is nearly always looking *along* it
-rather than at it, so the opening is hard to see while the extra stretch would be visible from
-anywhere.
+them. Clamped at 3x, the correction still covers everything up to about 71 degrees, and about 2% of
+splats hit the ceiling. On a face that steep the camera is nearly always looking *along* it rather
+than at it, so the opening is hard to see while the extra stretch would be visible from anywhere.
 
 **A splat needs thickness, and more of it than seems right.** A terrain sample is a patch of
 surface with no thickness at all, and a 3D Gaussian with a zero extent is degenerate, so the third
@@ -209,17 +205,7 @@ orthophoto happens to carry) to **1.54x**.
 
 It is baked rather than evaluated per frame because the DC term of a Gaussian is exactly where a
 light that never moves belongs, and because the splat renderer has no lighting stage to apply it
-anywhere else. The `TerrainLayer` mesh underneath *does* have one, and it is visible through the
-gaps on cliffs and past the splat frontier — so `app.tsx` gives deck.gl a `LightingEffect` with the
-same sun and a material split the same `0.68 / 0.32` way, and the two surfaces agree.
-
-**The splats are lifted three metres along the normal.** The splats and the mesh come from the
-same elevation service but not at the same resolution — the mesh is simplified to `meshMaxError`
-and built from a deeper zoom — so the two surfaces disagree by a few metres on steep ground. Drawn
-coincident, roughly half of each splat would land behind the mesh and be depth-tested away, which
-reads as tearing. Lifting along the normal rather than straight up keeps the offset perpendicular
-on a cliff, where a vertical lift would slide the surface sideways instead. The mesh still
-occludes splats behind a ridge; it just never fights the ones in front of it.
+anywhere else.
 
 ### The 0.11% that would have shown
 
@@ -227,8 +213,8 @@ Positions are built as Web Mercator offsets divided by the scale factor at the p
 as ground metres, because that is the frame deck.gl's common space actually is. Which raises a trap
 worth writing down: `@math.gl/web-mercator` divides by a flat `40.03e6` rather than
 `2 * PI * 6378137` = `40075017`. Build with the true circumference and expand with deck's and the
-scale is off by 0.11% — metres of drift a few kilometres out, which on a hillside is a visible slip
-between the splats and the mesh under them. So `terrain-grid.ts` keeps two constants apart
+scale is off by 0.11% — metres of drift a few kilometres out, so every splat lands a little off the
+ground it was cut from. So `terrain-grid.ts` keeps two constants apart
 deliberately: ground *sizes* use the real one, and the conversion into common space uses deck's,
 because that conversion has to be exactly undone by code it does not control.
 
@@ -293,9 +279,8 @@ from what the device granted rather than from what was asked for.
 | Elevation | [Mapterhorn](https://mapterhorn.com) `https://tiles.mapterhorn.com/{z}/{x}/{y}.webp` | 512px WebP, Terrarium encoding |
 | Imagery | [swisstopo SWISSIMAGE](https://www.swisstopo.admin.ch/en/orthoimage-swissimage-10) WMTS, EPSG:3857 | 256px JPEG, the Swiss national orthophoto mosaic |
 
-Both tile sources serve zoom 17 over the Alps, so terrain and texture stay sharp at the altitudes
-the cameras fly at. The mesh uses 256px tiles to match SWISSIMAGE's native resolution rather than
-upsampling it across Mapterhorn's 512px elevation tiles.
+Both tile sources serve zoom 17 over the Alps, so the splats stay sharp at the altitudes the cameras
+fly at.
 
 Attribution is required by the underlying data: see
 [Mapterhorn's attribution page](https://mapterhorn.com/attribution/) and
@@ -324,11 +309,6 @@ controller pull the centre down onto the terrain overrides exactly those numbers
   Changing it admits or evicts pages and re-downloads nothing. It is usually what binds, and it is
   the difference between a view at one resolution and a view at three — see
   [The budget is what mixed resolution is](#the-budget-is-what-mixed-resolution-is).
-- **Splats** — draws the splat layer or not.
-- **Mesh texture** — drops the orthophoto off the terrain mesh, leaving bare relief underneath the
-  splats. The clearest way to see what the splats are contributing. The mesh itself always stays:
-  it writes the depth that occludes distant splats.
-- **Wireframe** — the mesh's triangles, for inspecting the depth interaction.
 - **Fades**, **Analytic kernel**, **Orbit** — see above.
 
 The status line reports how many splats are drawn, the range of zoom levels in the frontier, the
@@ -343,12 +323,11 @@ finest splat spacing, the resident GPU memory, and how many tiles the workers ar
   residency ceiling and the error threshold both default higher there.
 - A height field cannot describe a vertical face or an overhang, so the steepest couple of percent
   of the terrain is covered by splats whose slope correction hit its ceiling and which therefore
-  leave gaps. The mesh shows through them. Making the splats cover it would mean inventing a
+  leave gaps. The background shows through them. Making the splats cover it would mean inventing a
   surface the elevation data does not contain.
 - Splat positions are exact at the place's origin and drift by up to about 0.1% of the distance
   from it, because the layer scales by `viewport.distanceScales`, which deck.gl computes at the
-  *viewport centre* rather than at the anchor — a few metres at the far edge of a view, invisible
-  against a lifted surface, and part of why the mesh is kept underneath rather than replaced.
+  *viewport centre* rather than at the anchor — a few metres at the far edge of a view.
 - deck.gl's own WebGPU support is still in progress (see the
-  [WebGPU developer guide](https://deck.gl/docs/developer-guide/webgpu)). `TerrainLayer`,
-  `TileLayer` and picking are supported; effects, extensions and base map interleaving are not.
+  [WebGPU developer guide](https://deck.gl/docs/developer-guide/webgpu)). Picking is supported;
+  effects, extensions and base map interleaving are not.

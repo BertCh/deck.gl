@@ -67,8 +67,8 @@ function aliasLumaSources(lumaRoot) {
  *
  * Source mode compiles files that live outside this example - `deck.gl/modules/*` and a luma.gl
  * checkout - and Node resolves their imports by walking up from *their* directory, which never
- * reaches this folder. Without this, importing `TerrainLayer` fails on `a5-js`: the package is
- * installed here, but `modules/geo-layers/src` cannot see it.
+ * reaches this folder. Without this, a package installed only here is invisible to the source files
+ * that import it.
  *
  * Only bare specifiers are handled, and only after the aliases above have had their say, so this
  * never overrides an explicit mapping.

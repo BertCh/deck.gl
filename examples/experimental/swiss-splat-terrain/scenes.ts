@@ -20,14 +20,6 @@ export const TERRAIN_IMAGE = 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp';
 export const SURFACE_IMAGE =
   'https://wmts10.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg';
 
-/** Terrarium packs elevation as `(r * 256 + g + b / 256) - 32768` metres. */
-export const ELEVATION_DECODER = {
-  rScaler: 256,
-  gScaler: 1,
-  bScaler: 1 / 256,
-  offset: -32768
-};
-
 /**
  * The colour distance dissolves into, and how far away that is.
  *
@@ -35,8 +27,8 @@ export const ELEVATION_DECODER = {
  * matched to the canvas background. It exists for one situation: a splat frontier that ends in mid
  * air, with the background showing through behind it.
  *
- * **Not used now, and kept only to make that situation recoverable.** The splats draw over a
- * `TerrainLayer` that continues to the horizon, so there is no frontier edge left to hide - and haze
+ * **Not used now, and kept only to make that situation recoverable.** The coarse levels of the tree
+ * already reach the horizon, so there is no frontier edge left to hide - and haze
  * measured from the scene *origin* rather than the camera is only ever defensible while the camera
  * orbits that origin, which stops being true the moment anyone drags. Passing it to
  * `TerrainSplatSource` puts it back.

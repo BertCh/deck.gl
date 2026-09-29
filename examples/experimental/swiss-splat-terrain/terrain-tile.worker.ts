@@ -49,9 +49,6 @@ const MISSING_IMAGERY_RGB: readonly [number, number, number] = [150, 152, 156];
  * captured under - an orthophoto mosaic is stitched from passes months apart and has no single sun.
  * It is a small term whose job is to let a ridge read as a ridge on a projector, where the imagery's
  * own contrast is the first thing to go.
- *
- * Must stay in step with the `LightingEffect` in `app.tsx`, or the splats and the mesh under them
- * shade differently.
  */
 const SUN: readonly [number, number, number] = (() => {
   const vector: [number, number, number] = [-0.48, 0.42, 0.77];
@@ -95,7 +92,6 @@ async function handleRequest(request: TerrainTileRequest): Promise<void> {
       sigma: request.sigma,
       thickness: request.thickness,
       relief: request.relief,
-      lift: request.lift,
       sun: SUN,
       missingImageryRgb: MISSING_IMAGERY_RGB,
       haze: request.haze,
