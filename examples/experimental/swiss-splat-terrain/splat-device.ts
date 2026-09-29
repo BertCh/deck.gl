@@ -36,21 +36,23 @@ import {GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH} from '@luma.gl/splats';
 const PROJECTED_RECORD_BYTES = GPU_SPLAT_PROJECTED_RECORD_BYTE_LENGTH;
 
 /**
- * Headroom between the residency budget and the capacity the graph is reserved for.
+ * Margin kept between the largest budget offered and what the storage binding could hold.
  *
- * The layer reserves its command graph for `maxResidentNodes` batches, which the app sets at 1.3x
- * the budget so a frontier plus its fade ramps fits without a graph rebuild. The projected buffer is
- * sized from that reservation rather than from the budget, so the budget has to be divided by it.
+ * The layer sizes the projected buffer to the selected budget itself (`expectedSplatCount`), and
+ * pages lingering in a fade are pinned inside that same budget, so a budget of exactly
+ * `binding / 32` would fit. The margin is there so a residency count that briefly runs past the
+ * budget still does not reach the binding limit, where the graph throws instead of degrading.
  */
 const RESERVATION_FACTOR = 1.3;
 
 /**
  * Storage binding this example asks for, when the adapter will give it.
  *
- * 512 MiB is about 8.6M resident splats after the reservation factor, which is roughly twice what
- * the Matterhorn scene needs to stop refusing pages at 2 px. Asking for more is free in itself --
- * a limit is a ceiling, not an allocation -- but the reservation *is* allocated up front, so the
- * budget offered to the user is what bounds real memory, not this number.
+ * 512 MiB is about 12.9M resident splats after the reservation factor, so the ladder in `app.tsx`
+ * is offered up to its 12.8M rung. Each rung above that needs twice the binding: 25.6M needs about
+ * 1 GiB, 102.4M about 4 GiB. Asking for more is free in itself -- a limit is a ceiling, not an
+ * allocation -- but the reservation *is* allocated up front, so the budget offered to the user is
+ * what bounds real memory, not this number.
  */
 const REQUESTED_STORAGE_BINDING_BYTES = 512 * 1024 * 1024;
 

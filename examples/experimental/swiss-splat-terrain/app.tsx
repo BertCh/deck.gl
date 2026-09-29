@@ -51,11 +51,11 @@ const deviceType: 'webgpu' | 'webgl' =
  * **What the ceiling is depends on the device, so it is read from the device.** The graph keeps its
  * projected records in one storage binding, and 32 bytes a splat against WebGPU's default 128 MiB
  * is about 3.2M after the reservation factor. `splat-device.ts` asks for 512 MiB instead, which is
- * 12.9M -- so the ladder below is offered as far up as the device granted and no further.
+ * 12.9M -- so the ladder below is offered as far up as the device granted and no further. With
+ * that request the dropdown stops at 12.8M; the rungs above it appear only on a device granted a
+ * larger binding (about 1 GiB per 25.6M).
  */
-const RESIDENCY_LADDER = [
-  1_600_000, 3_200_000, 6_400_000, 12_800_000, 25_600_000, 51_200_000, 102_400_000
-] as const;
+const RESIDENCY_LADDER = [1_600_000, 3_200_000, 6_400_000, 12_800_000, 25_600_000] as const;
 
 /**
  * What the ladder is capped at by default, when the device allows more.
@@ -87,7 +87,16 @@ function getPreferredResidency(maxResidentSplats: number, type: 'webgpu' | 'webg
 
 const DEFAULT_RESIDENCY = getPreferredResidency(CONSERVATIVE_MAX_RESIDENT, deviceType);
 
-/** Geometric error, in pixels, a level-of-detail node may project to before it is refined. */
+/**
+ * Drawing-buffer resolution, in device pixels per CSS pixel: the display's own, capped at 1.5.
+ *
+ * Blending is paid per pixel, and a 2x display has four times the pixels of the CSS size. Splats are
+ * soft-edged, so the last step from 1.5x to 2x buys little visible sharpness for the ~44% more
+ * pixels it blends. Capped rather than fixed, so a 1x display is never supersampled.
+ */
+const RENDER_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, 1.5);
+
+/** Geometric error, in CSS pixels, a level-of-detail node may project to before it is refined. */
 const DETAIL_OPTIONS = [1, 2, 4, 8] as const;
 const DEFAULT_DETAIL = deviceType === 'webgpu' ? 2 : 8;
 
@@ -363,6 +372,7 @@ export default function App() {
     <>
       <DeckGL
         views={new MapView()}
+        useDevicePixels={RENDER_PIXEL_RATIO}
         // Controlled rather than initial, because the orbit writes to it and each place frames its
         // own subject, so choosing one has to move the camera there.
         viewState={viewState}

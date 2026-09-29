@@ -301,7 +301,7 @@ controller pull the centre down onto the terrain overrides exactly those numbers
 ## Controls
 
 - **Place** — Matterhorn, Lauterbrunnen or Aletsch.
-- **Detail** — the geometric error, in pixels, a level-of-detail node may project to before it is
+- **Detail** — the geometric error, in CSS pixels, a level-of-detail node may project to before it is
   refined. A node's error is the spacing of its own splats, so this reads directly: at 2,
   refinement continues until the splats being looked at sit about two pixels apart. Defaults to
   2 px on WebGPU and 8 px on WebGL2, where every frontier change is a CPU resort.
