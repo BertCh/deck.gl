@@ -121,7 +121,9 @@ aliases.unshift({
 
 export default defineConfig({
   plugins: [resolveFromExample(exampleModules)],
-  resolve: {alias: aliases},
+  // `modules/react/src` would otherwise pick up the repo root's React, a second copy whose hooks
+  // fail against this example's `react-dom`.
+  resolve: {alias: aliases, dedupe: ['react', 'react-dom']},
   // `modules/*/src` and the luma.gl checkout both live outside this folder, and Vite refuses to serve
   // either to the browser unless they are allowed here.
   server: {port: 8080, fs: {allow: [exampleDir, repoRoot, lumaSource]}},
