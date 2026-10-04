@@ -4,9 +4,9 @@
 
 import {defineConfig} from 'vite';
 import {createRequire} from 'module';
-import {existsSync, readdirSync, readFileSync} from 'fs';
 import {dirname, join} from 'path';
 import {fileURLToPath} from 'url';
+import {getLumaSourceAliases} from '../../../scripts/luma-source-aliases.mjs';
 
 const exampleDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(exampleDir, '..', '..', '..');
@@ -20,46 +20,6 @@ function pinScope(scope, packagesDir) {
     find: new RegExp(`^${scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([^/]+)$`),
     replacement: join(packagesDir, `${scope}/$1`)
   };
-}
-
-/**
- * Aliases every `@luma.gl` entry point to a luma.gl checkout's TypeScript sources.
- *
- * The aliases are derived from each module's own `exports` map rather than guessed, because the
- * subpaths are not uniform - `@luma.gl/gpgpu/gpu-core` lives at `src/gpu-core` but
- * `@luma.gl/gpgpu/cpu` lives at `src/operations/cpu`. Reading the map keeps this correct as luma
- * adds entry points, and an unmapped subpath fails loudly instead of resolving to the wrong file.
- */
-function aliasLumaSources(lumaRoot) {
-  const modulesDir = join(lumaRoot, 'modules');
-  if (!existsSync(modulesDir)) {
-    throw new Error(`LUMA_SOURCE is set but ${modulesDir} does not exist.`);
-  }
-
-  const aliases = [];
-  for (const moduleName of readdirSync(modulesDir)) {
-    const manifestPath = join(modulesDir, moduleName, 'package.json');
-    if (!existsSync(manifestPath)) {
-      continue;
-    }
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    for (const [subpath, target] of Object.entries(manifest.exports ?? {})) {
-      const distPath = typeof target === 'string' ? target : target.import;
-      if (!distPath) {
-        continue;
-      }
-      const sourcePath = distPath
-        .replace(/^\.\/dist\//, './src/')
-        .replace(/\/index\.js$/, '')
-        .replace(/\.js$/, '');
-      aliases.push({
-        find: `${manifest.name}${subpath.replace(/^\./, '')}`,
-        replacement: join(modulesDir, moduleName, sourcePath.replace(/^\.\//, ''))
-      });
-    }
-  }
-  // Longest first, so `@luma.gl/gpgpu/gpu-core` is not swallowed by `@luma.gl/gpgpu`.
-  return aliases.sort((a, b) => b.find.length - a.find.length);
 }
 
 /**
@@ -113,7 +73,7 @@ if (!lumaSource) {
       'See SPLAT-LAYERS-BRANCH.md at the repo root.'
   );
 }
-aliases.unshift(...aliasLumaSources(lumaSource));
+aliases.unshift(...getLumaSourceAliases(lumaSource));
 aliases.unshift({
   find: /^@deck\.gl\/([^/]+)$/,
   replacement: join(repoRoot, 'modules/$1/src')

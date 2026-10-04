@@ -55,6 +55,7 @@ const renderPlaywright = playwright({
 });
 import {resolve} from 'path';
 import {browserCommands} from './test/setup/browser-commands';
+import {getLumaSourceAliases} from './scripts/luma-source-aliases.mjs';
 
 const rootDir = import.meta.dirname;
 
@@ -106,6 +107,24 @@ const browserAliases = {
   ...aliases,
   '@deck.gl/test-utils': resolve(rootDir, 'modules/test-utils/src/vitest.ts')
 };
+
+// `@deck.gl/splat-layers` calls `@luma.gl/splats` APIs that only the luma.gl `deck-splat-layers`
+// branch has. LUMA_SOURCE=<luma.gl checkout> runs every project against that checkout's sources;
+// without it the browser splat-layer specs cannot import, and since browser projects share one
+// module graph a failed import would fail every file, so they are left out.
+const lumaSource = process.env.LUMA_SOURCE;
+const lumaSourceAliases = lumaSource ? getLumaSourceAliases(lumaSource) : [];
+const splatLayerBrowserTests = lumaSource ? [] : ['test/modules/splat-layers/**'];
+
+function getProjectAliases(projectAliases: Record<string, string>) {
+  if (!lumaSource) {
+    return projectAliases;
+  }
+  return [
+    ...lumaSourceAliases,
+    ...Object.entries(projectAliases).map(([find, replacement]) => ({find, replacement}))
+  ];
+}
 
 // Shared coverage configuration
 const coverageConfig: TestUserConfig["coverage"] = {
@@ -167,7 +186,7 @@ const projects = [
       // Used by test-fast for quick validation
       {
         extends: true,
-        resolve: {alias: aliases},
+        resolve: {alias: getProjectAliases(aliases)},
         test: {
           name: 'node',
           environment: 'node',
@@ -198,7 +217,7 @@ const projects = [
       // Tape compatibility project - verifies the legacy @deck.gl/test-utils entry point
       {
         extends: true,
-        resolve: {alias: aliases},
+        resolve: {alias: getProjectAliases(aliases)},
         test: {
           name: 'tape-compat',
           environment: 'node',
@@ -214,7 +233,7 @@ const projects = [
       // Used by test-headless and test-ci
       {
         extends: true,
-        resolve: {alias: browserAliases},
+        resolve: {alias: getProjectAliases(browserAliases)},
         optimizeDeps: optimizeDepsConfig,
         assetsInclude: assetsIncludeConfig,
         server: serverConfig,
@@ -225,7 +244,7 @@ const projects = [
           // headless and render, so keep them in `browser` only for manual
           // debugging until the shared interaction harness is reworked.
           include: ['test/modules/**/*.spec.ts'],
-          exclude: [...excludedTests, 'test/modules/**/*.node.spec.ts'],
+          exclude: [...excludedTests, ...splatLayerBrowserTests, 'test/modules/**/*.node.spec.ts'],
           globals: false,
           testTimeout: 30000,
           // Disable isolation and file parallelism to avoid:
@@ -252,14 +271,14 @@ const projects = [
       // Used by test-browser
       {
         extends: true,
-        resolve: {alias: browserAliases},
+        resolve: {alias: getProjectAliases(browserAliases)},
         optimizeDeps: optimizeDepsConfig,
         assetsInclude: assetsIncludeConfig,
         server: serverConfig,
         test: {
           name: 'browser',
           include: ['test/modules/**/*.spec.ts', 'test/interaction/**/*.spec.ts'],
-          exclude: [...excludedTests, 'test/modules/**/*.node.spec.ts'],
+          exclude: [...excludedTests, ...splatLayerBrowserTests, 'test/modules/**/*.node.spec.ts'],
           globals: false,
           testTimeout: 30000,
           isolate: false,
@@ -284,7 +303,7 @@ const projects = [
       {
         extends: true,
         define: renderTestDefine,
-        resolve: {alias: browserAliases},
+        resolve: {alias: getProjectAliases(browserAliases)},
         optimizeDeps: optimizeDepsConfig,
         assetsInclude: assetsIncludeConfig,
         server: serverConfig,
