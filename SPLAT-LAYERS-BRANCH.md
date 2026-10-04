@@ -6,30 +6,32 @@ lifecycle, a reworked `TerrainController`, and a live Swiss terrain example. It 
 request and it does not build on released packages alone: the layer needs luma.gl work from a
 companion branch. This file says what is here, what it depends on, and how to run it.
 
-State as of 2026-09-28.
+State as of 2026-10-04.
 
 ## Summary
 
-- Branch `splat-layers`, on top of upstream deck.gl `7fa7dc7d9` (`git log 7fa7dc7d9..` lists the
-  commits).
-- Companion branch: luma.gl `deck-splat-layers`, on top of upstream luma.gl `80fc29583`.
+- Branch `splat-layers`, merged with upstream deck.gl `master` at `295811df8`
+  (`git log --first-parent upstream/master..splat-layers` lists the branch's own commits).
+- Companion branch: luma.gl `deck-splat-layers`, merged with upstream luma.gl `master` at
+  `5d2150b5d` (`10.0.0-alpha.2`).
   `@deck.gl/splat-layers` calls `@luma.gl/splats` APIs that exist only there (see
   [The luma.gl dependency](#the-luma-gl-dependency)).
 - The core changes (compute stage, `TerrainController`, the image-prop and `SimpleMeshLayer`
-  texture fixes) build and test against published luma.gl 9.4.2. Only the splat package and the
-  example need the luma.gl branch.
+  texture fixes) build and test against published luma.gl `10.0.0-alpha.2`, the version upstream
+  deck.gl `master` uses. Only the splat package, its tests and the example need the luma.gl branch.
 
 ## The repositories
 
 | Repo | Branch | Base | Required? |
 | --- | --- | --- | --- |
-| deck.gl ([BertCh/deck.gl](https://github.com/BertCh/deck.gl/tree/splat-layers)) | `splat-layers` | upstream `master` `7fa7dc7d9` (lerna `9.4.0-beta.4`) | this repo |
-| luma.gl ([BertCh/luma.gl](https://github.com/BertCh/luma.gl/tree/deck-splat-layers)) | `deck-splat-layers` | upstream `master` `80fc29583` | **yes**, for `@deck.gl/splat-layers` and the example |
-| loaders.gl | `splat-loaders` (not published) | upstream `46d405d58` | no |
+| deck.gl ([BertCh/deck.gl](https://github.com/BertCh/deck.gl/tree/splat-layers)) | `splat-layers` | upstream `master` `295811df8` (lerna `9.4.0-beta.4`) | this repo |
+| luma.gl ([BertCh/luma.gl](https://github.com/BertCh/luma.gl/tree/deck-splat-layers)) | `deck-splat-layers` | upstream `master` `5d2150b5d` | **yes**, for `@deck.gl/splat-layers` and the example |
+| loaders.gl | `splat-loaders` (not published) | upstream `master` `52d8abee5` | no |
 
 ### luma.gl: `deck-splat-layers`
 
-Three commits on `80fc29583`:
+Three commits on `80fc29583`, then a formatting fix (`f9f0c602b`), a merge of upstream `master`
+(`89b86c9dc`) and one test fix:
 
 1. `c457f53a0` **feat(splats,gpgpu)**: the APIs `@deck.gl/splat-layers` needs: clip regions and
    planes, antialiasing modes, depth-key modes, fragment kernels, residency budgets, stage timings,
@@ -40,16 +42,20 @@ Three commits on `80fc29583`:
    pages recovered, unwanted pages demoted so residency can evict them), view-weighted LOD
    (`requestErrorScale`, `focusDistance`, `distanceFalloff`), float16 depth-key clamping,
    orthographic depth keys, degenerate-covariance opacity, and picking that follows `alphaCutoff`.
+4. `66b6185b2` **test(experimental)**: upstream's GPUDataFrame bounded global-sort test is resized,
+   because 2,048-key radix tiles no longer need a 3D dispatch at its old row count.
 
 Changed defaults and constants are listed in that branch's `docs/upgrade-guide.md` and
-`docs/whats-new.md`. The commits were made with `--no-verify` because that checkout had no
-`node_modules`; its tests were run through deck.gl's vitest instead (see
+`docs/whats-new.md`. The commits before the merge were made with `--no-verify` because that
+checkout had no `node_modules`, or none matching their tree; since the merge the branch passes its own `yarn test-fast` hook (see
 [What has been verified](#what-has-been-verified)).
 
 ### loaders.gl: `splat-loaders` (related, not required)
 
 `GaussianPLYLoader`, `SOGLoader`, an SPZ codec and encoder, and coordinate-system and
-spherical-harmonics helpers for `@loaders.gl/splats`. Nothing in this repo imports it; until those
+spherical-harmonics helpers for `@loaders.gl/splats`. Upstream #4023 has since added its own SPZ
+gzip path; the rebased commit routes it through this branch's parser, which also reads version 1
+and decodes version-2 rotations the way the reference packer writes them. Nothing in this repo imports it; until those
 loaders are released, decode captures yourself and pass the columns to `SplatLayer`.
 
 ## What this branch changes
@@ -86,27 +92,34 @@ loaders are released, decode captures yourself and pass the columns to `SplatLay
   what this branch implements.
 - API docs in `docs/api-reference/splat-layers/` and `docs/api-reference/core/`, plus
   `docs/whats-new.md`.
-- `yarn.lock` resolves every `@luma.gl/*` package to 9.4.2, so one copy of `@luma.gl/core` is
-  installed (`@luma.gl/splats@9.4.2` pins its siblings exactly, and two copies break deck.gl's
-  `instanceof Device` checks).
+- `yarn.lock` resolves every `@luma.gl/*` package to `10.0.0-alpha.2`, so one copy of
+  `@luma.gl/core` is installed (two copies break deck.gl's `instanceof Device` checks).
+  `@luma.gl/splats` is only a peer dependency: luma.gl 10 does not publish it, and the npm 9.4.2
+  release would pull in a second `@luma.gl/core`.
+- `scripts/luma-source-aliases.mjs`: the `LUMA_SOURCE` aliases, shared by the example's Vite config
+  and `vitest.config.ts`.
 
 ## The luma.gl dependency
 
 `@deck.gl/splat-layers` imports types, constants, WGSL and renderer props from `@luma.gl/splats`
-that published `@luma.gl/splats@9.4.2` does not have. Against npm luma.gl:
+that no published luma.gl has: `@luma.gl/splats@9.4.2` lacks them, and luma.gl 10 does not publish
+`@luma.gl/splats` at all. Against npm luma.gl:
 
 - `yarn build` builds every other package, then fails on `modules/splat-layers`.
-- The `test/modules/splat-layers` specs fail to import.
+- `yarn test-headless` leaves out the `test/modules/splat-layers` browser specs, which cannot
+  import. Browser projects share one module graph, so one failed import would fail every file.
 - The example refuses to start.
 
-Against the `deck-splat-layers` branch, all three work. The example's `vite.config.mjs` requires
+Against the `deck-splat-layers` branch, the tests and the example work: run
+`LUMA_SOURCE=<luma.gl checkout> yarn test-headless` to alias `@luma.gl/*` to that checkout in every
+vitest project and include the splat specs. The example's `vite.config.mjs` requires
 `LUMA_SOURCE=<luma.gl checkout>`, aliases every `@luma.gl` entry point to that checkout's sources
 and `@deck.gl/*` to this repo's `modules/*/src`. Its `tsconfig.json` assumes the luma.gl checkout
 sits at `../vis.gl-build/luma.gl` beside this repository; adjust the `paths` there if yours
 does not.
 
-Once luma.gl releases these APIs, raise `@luma.gl/*` in `modules/splat-layers/package.json` and the
-root to that release, and drop `LUMA_SOURCE` from the example.
+Once luma.gl publishes `@luma.gl/splats` with these APIs, add it back to the dependencies of
+`modules/splat-layers/package.json` and the example, and drop `LUMA_SOURCE`.
 
 ## Running it
 
@@ -117,7 +130,7 @@ git clone --filter=blob:none -b splat-layers https://github.com/BertCh/deck.gl.g
 git clone --filter=blob:none -b deck-splat-layers https://github.com/BertCh/luma.gl.git vis.gl-build/luma.gl
 
 cd deck.gl && yarn                                          # root workspace
-cd examples/experimental/swiss-splat-terrain && npm ci      # the example is not a workspace
+cd examples/experimental/swiss-splat-terrain && npm install # the example is not a workspace
 LUMA_SOURCE=../../../../vis.gl-build/luma.gl npm start      # serves on :8080
 ```
 
@@ -126,19 +139,21 @@ needs WebGPU for the full feature set; on WebGL2 it falls back to a CPU sort and
 
 ## What has been verified
 
-On 2026-09-28:
+On 2026-10-04, after merging upstream `master` into both branches:
 
 | Check | Result |
 | --- | --- |
 | `yarn lint` | pass |
-| `vitest --project node` (whole repo) | pass |
-| `vitest --project headless` on `test/modules/core` and `test/modules/mesh-layers` | 72 files, 422 tests pass |
-| `test/modules/splat-layers`, with `@luma.gl/*` aliased to the luma.gl branch | 6 files pass |
-| `tsc` on `modules/splat-layers` and its tests, against the luma.gl branch | no errors |
-| Example `vite build` and `tsc` with `LUMA_SOURCE` | pass |
-| luma.gl node specs (`splats`, `gpgpu`, `webgpu` helpers) through deck.gl's vitest | 1,283 tests pass; 5 unrelated gpgpu files cannot load optional packages in that harness |
+| `vitest --project node` (whole repo) | pass, with and without `LUMA_SOURCE` |
+| `yarn test-headless` (splat specs left out) | 1,046 pass, 1 fail: `DeckGL#mount/unmount` times out in the full run and passes alone |
+| `LUMA_SOURCE=<luma.gl branch> yarn test-headless` | 1,063 pass, 5 fail: the React widget-positioning tests, which fail the same way on upstream `master` in a full run and pass alone |
+| `test/modules/splat-layers` with `LUMA_SOURCE` | 6 files, 41 tests pass |
+| Example `tsc` against the luma.gl branch | 2 errors, both in luma.gl sources (`luma.ts` unused `@ts-expect-error`, `gpu-table-transform.ts` `super` placement) and present before the merge |
+| Example `vite build` with `LUMA_SOURCE` | pass; a headless WebGPU frame matches the pre-merge build (RMSE 1.06 / 255) |
+| luma.gl branch `yarn build`, `yarn lint`, `yarn test-node` | pass (3,944 tests) |
+| luma.gl branch `yarn test-headless` | 2,678 pass; 6 fail, all failing before the merge too (4 splats/gpgpu WebGPU specs on this branch, 1 Transverse Mercator spec upstream, plus a UTM spec that times out only in the full run) |
 | `yarn build` | fails at `modules/splat-layers` against npm luma.gl, as described above |
-| Render tests, browser tests, `yarn test-website`, WebGPU browser specs in luma.gl | not run |
+| Render tests, browser tests, `yarn test-website` | not run |
 
 ## Known limits
 
@@ -159,11 +174,15 @@ identical code. Don't rank settings on them.
 
 ## Keeping up with upstream
 
+Both branches are published, so they take upstream as merges rather than rebases, which keeps the
+commit IDs quoted here valid:
+
 ```bash
 git fetch upstream
-git rebase upstream/master
+git merge upstream/master
 ```
 
 The work touches `@deck.gl/core` internals (`layer.ts`, `layers-pass.ts`, `deck-renderer.ts`), so
-conflicts there are the likely ones. Rebase luma.gl `deck-splat-layers` onto luma.gl `master` the
-same way.
+conflicts there are the likely ones; `yarn.lock` conflicts are best resolved by taking upstream's
+file and running `yarn`. Merge luma.gl `master` into `deck-splat-layers` the same way, and move both
+together: when upstream deck.gl changes its luma.gl version, the luma.gl branch has to match it.
